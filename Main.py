@@ -33,8 +33,8 @@ CREATE TABLE IF NOT EXISTS users (
 conn.commit()
 
 # --- Configuration ---
-TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+TOKEN = os.getenv("BOT_TOKEN", "your-bot-token")
+CHANNEL_ID = os.getenv("CHANNEL_ID", "your-channel-id")
 COST_TEXT = int(os.getenv("COST_TEXT", 3))
 COST_MEDIA = int(os.getenv("COST_MEDIA", 5))
 INITIAL_CREDITS = int(os.getenv("INITIAL_CREDITS", 100))
@@ -93,16 +93,16 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(get_message("USER_NOT_REGISTERED_MSG"))
 
-# --- Multi-Post Handlers ---
-async def writemultiple_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Write Command ---
+async def write_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id_hash = hash_user_id(update.effective_user.id)
     message_collections[user_id_hash] = []
-    await update.message.reply_text(get_message("MULTI_POST_INSTRUCTIONS"))
+    await update.message.reply_text(get_message("WRITE_INSTRUCTIONS"))
 
-async def handle_multi_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Handle Single Post Content ---
+async def handle_single_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id_hash = hash_user_id(update.effective_user.id)
     
-    # Only handle if in collection mode
     if user_id_hash not in message_collections:
         return
     
@@ -134,6 +134,7 @@ async def handle_multi_content(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     )
 
+# --- Done Command ---
 async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id_hash = hash_user_id(update.effective_user.id)
     messages = message_collections.get(user_id_hash, [])
@@ -162,7 +163,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'user_id_hash': user_id_hash,
         'messages': messages,
         'total_cost': total_cost,
-        'credits': credits  # Store current balance for rollback
+        'credits': credits
     }
     
     keyboard = [[
@@ -178,7 +179,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# --- Shared Confirmation Handler ---
+# --- Confirmation Handler ---
 async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -250,6 +251,10 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
         if confirmation_id in pending_posts:
             del pending_posts[confirmation_id]
 
+# --- Help Command ---
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(get_message("HELP_MESSAGE"))
+
 # --- Main Application ---
 def main():
     application = Application.builder().token(TOKEN).build()
@@ -257,9 +262,10 @@ def main():
     handlers = [
         CommandHandler("start", start),
         CommandHandler("balance", balance),
-        CommandHandler("writemultiple", writemultiple_command),
+        CommandHandler("write", write_command),
         CommandHandler("done", done_command),
-        MessageHandler(filters.TEXT | filters.PHOTO | filters.Document.ALL, handle_multi_content),
+        CommandHandler("help", help_command),
+        MessageHandler(filters.TEXT | filters.PHOTO | filters.Document.ALL, handle_single_content),
         CallbackQueryHandler(handle_confirmation)
     ]
     
