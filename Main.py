@@ -4,7 +4,7 @@ from flask import Flask, request
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
 from dotenv import load_dotenv
 import sqlite3
-import threading
+import logging
 
 # Load environment variables
 load_dotenv()
@@ -13,6 +13,7 @@ ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 RENDER_URL = os.getenv("RENDER_URL")  # Your Render service URL (e.g., https://your-service-name.onrender.com)
 
+# Initialize bot and Flask app
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
@@ -248,6 +249,9 @@ def handle_review(call):
             bot.send_message(user_id, TEXTS["story_rejected"])
 
     bot.edit_message_reply_markup(ADMIN_GROUP_ID, call.message.message_id, reply_markup=None)
+    
+# Enable logging
+logging.basicConfig(level=logging.DEBUG)
 
 # Webhook endpoint
 @app.route('/webhook', methods=['GET', 'POST'])
@@ -257,7 +261,7 @@ def webhook():
     elif request.method == 'POST':
         if request.headers.get('content-type') == 'application/json':
             json_string = request.get_data().decode('utf-8')
-            print("Received update:", json_string)  # Log incoming updates
+            logging.debug("Received update: %s", json_string)  # Log incoming updates
             update = telebot.types.Update.de_json(json_string)
             bot.process_new_updates([update])
             return 'ok', 200
