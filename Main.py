@@ -14,29 +14,33 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# User-facing texts
+# User-facing texts (Amharic)
 TEXTS = {
-    "welcome": "👋 Welcome! Choose a category for your story:",
-    "category_selected": "✍️ Send me your story (text, image, or both), and an admin will review it before posting.",
-    "no_category": "⚠️ Please start with /start to choose a category before sending a story.",
-    "unsupported_format": "⚠️ Unsupported format. Please send photos, videos, or text only.",
-    "too_many_pending": "⚠️ You already have too many pending submissions. Please wait for approval.",
-    "text_too_long": "⚠️ Your text is too long. Please keep it under 4000 characters.",
-    "story_submitted": "Your story has been sent for admin review.",
-    "story_approved": "✅ Your story has been approved and posted to the channel! 🎉",
-    "story_rejected": "❌ Your story was not approved.",
-    "media_group_warning": "⚠️ You can only send one image per post. Please try again with a single image.",
-    "pending_limit": "⚠️ You already have too many pending submissions. Please wait for approval.",
-    "error_occurred": "⚠️ An error occurred. Please try again later.",
+    "welcome": "እንኳን ደና መጡ! እባክዎ የፁሁፏን ይዘት ይምረጡ",
+    "category_selected": "አሁን መፃፋ ይጀምሩ 🗒️🖊️፣ ሲጨርሱ ፁህፉወ ወደ ሳንሱር ይላካል። 📌 ልብ ይበሉ; ካስፈለገ አንድ አንድ ፎቶ ብቻ ይጠቀሙ። መልካም ግዜ",
+    "no_category": "ለፁህፉወ ምንም ይዘት አልመረጡም፣ እንደገና ለመጀመር /start ይጫኑ",
+    "unsupported_format": "⚠️ እባክወ ፎቶ ወይም ቪዲዬ ብቻ ይጠቀሙ እና እንደገና ይሞክሩ  /start",
+    "too_many_pending": "⚠️ ለሳንሱር የተላኩ ብዙ ፁህፎች ስላልወት ትንሽ ቆይተዉ ይሞክሩ",
+    "text_too_long": "⚠️ ፁህፋዎ ከ 4000 ፊደላት በላይ ስለሆነ ድጋሚ አስተካክለዉ በ /start ይሞክሩ",
+    "story_submitted": "ፁህፋወ ለሳንሱር ተልኳል፣ እባክወ በትግስት ይጠብቁ",
+    "story_approved": "✅ ፁህፋወ በ @lomi_reads ቻናል ላይ ተለጥፏል 🎉 ሌላ ለመፃፍ /start ብለዉ ይጀምሩ",
+    "story_rejected": "❌ ፁሁፍወ ሳንሱር አላለፈም እንደገና ይሞክሩ /start .",
+    "media_group_warning": "⚠️እባክወ በአንድ ፁህፋ ከ አንድ በላይ ፎቶ ወይም ቪዲዬ አይጠቀሙ እና እንደገና ይሞክሩ /start",
+    "pending_limit": "⚠️ ለሳንሱር የተላኩ ብዙ ፁህፎች ስላልወት ትንሽ ቆይተዉ ይሞክሩ",
+    "error_occurred": "⚠️ የሢሥተም ችግር አጋጥሟል። እባክዎ ትንሽ ቆይተዉ ይሞክሩ",
 }
 
 # Define categories for user selection
 CATEGORIES = {
-    "real": "Ethiopian History",
-    "fiction": "Fiction Stories",
-    "joke": "Jokes",
-    "celebrity": "Celebrity Stories",
-    "others": "Other Stories"
+    "real": "እዉነተኛ ታሪክ ወይም አጋጣሚ",
+    "fiction": "ልብ ወልድ ታሪኮች",
+    "joke": "አጫጭር ቀልዶች",
+    "celebrity": "ታዋቂ ሰውችን በተመለከተ",
+    "news": "ዜና",
+    "politics": "ፖለቲካ",
+    "personal_opinion": "የግል ምልከታ",
+    "public_info": "ለማህበረቡ ጥቆማ",
+    "others": "ሌሎች ታሪኮች",
 }
 
 # Dictionary to buffer media group messages
