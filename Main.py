@@ -249,7 +249,7 @@ def handle_review(call):
     bot.edit_message_reply_markup(ADMIN_GROUP_ID, call.message.message_id, reply_markup=None)
 
 # Start polling
-bot.infinity_polling()
+# bot.infinity_polling()
 
 # Webhook endpoint
 @app.route('/webhook', methods=['POST'])
