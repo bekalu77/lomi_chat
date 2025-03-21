@@ -1,9 +1,10 @@
 import os
 import telebot
 from flask import Flask, request
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
 from dotenv import load_dotenv
 import sqlite3
+import threading
 
 # Load environment variables
 load_dotenv()
@@ -18,16 +19,16 @@ app = Flask(__name__)
 # User-facing texts (Amharic)
 TEXTS = {
     "welcome": "እንኳን ደና መጡ! እባክዎ የፁሁፏን ይዘት ይምረጡ",
-    "category_selected": "አሁን መፃፋ ይጀምሩ 🗒️🖊️፣ ሲጨርሱ ፁህፉወ ወደ ሳንሱር ይላካል። 📌 ልብ ይበሉ; ካስፈለገ አንድ አንድ ፎቶ ብቻ ይጠቀሙ። መልካም ግዜ",
+    "category_selected": "አሁን መፃፋ ይጀምሩ 🗒️🖊️፣ ሲጨርሱ ፁህፉወ ወደ ሳንሱር ይላካል። 📌 ልብ ይበሉ; ካስፈለገ �ንድ አንድ ፎቶ ብቻ ይጠቀሙ። መልካም ግዜ",
     "no_category": "ለፁህፉወ ምንም ይዘት አልመረጡም፣ እንደገና ለመጀመር /start ይጫኑ",
     "unsupported_format": "⚠️ እባክወ ፎቶ ወይም ቪዲዬ ብቻ ይጠቀሙ እና እንደገና ይሞክሩ  /start",
     "too_many_pending": "⚠️ ለሳንሱር የተላኩ ብዙ ፁህፎች ስላልወት ትንሽ ቆይተዉ ይሞክሩ",
-    "text_too_long": "⚠️ ፁህፋዎ ከ 4000 ፊደላት በላይ ስለሆነ ድጋሚ አስተካክለዉ በ /start ይሞክሩ",
+    "text_too_long": "⚠️ ፁህፋዎ ከ 4000 ፊደላት �ላይ ስለሆነ ድጋሚ አስተካክለዉ በ /start ይሞክሩ",
     "story_submitted": "ፁህፋወ ለሳንሱር ተልኳል፣ እባክወ በትግስት ይጠብቁ",
     "story_approved": "✅ ፁህፋወ በ @lomi_reads ቻናል ላይ ተለጥፏል 🎉 ሌላ ለመፃፍ /start ብለዉ ይጀምሩ",
     "story_rejected": "❌ ፁሁፍወ ሳንሱር አላለፈም እንደገና ይሞክሩ /start .",
-    "media_group_warning": "⚠️እባክወ በአንድ ፁህፋ ከ አንድ በላይ ፎቶ ወይም ቪዲዬ አይጠቀሙ እና እንደገና ይሞክሩ /start",
-    "pending_limit": "⚠️ ለሳንሱር የተላኩ ብዙ ፁህፎች ስላልወት ትንሽ ቆይተዉ ይሞክሩ",
+    "media_group_warning": "⚠️እባክወ በአንድ ፁህፋ �ከ አንድ በላይ ፎቶ ወይም ቪዲዬ �ይጠቀሙ እና እንደገና ይሞክሩ /start",
+    "pending_limit": "⚠️ ለሳንሱር �ተላኩ ብዙ ፁህፎች ስላልወት ትንሽ ቆይተዉ ይሞክሩ",
     "error_occurred": "⚠️ የሢሥተም ችግር አጋጥሟል። እባክዎ ትንሽ ቆይተዉ ይሞክሩ",
 }
 
@@ -64,7 +65,6 @@ with DatabaseConnection() as cursor:
         user_id INTEGER PRIMARY KEY,
         category TEXT,
         last_activity REAL DEFAULT (strftime('%s', 'now'))
-)
     """)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS posts (
@@ -247,10 +247,6 @@ def handle_review(call):
             bot.send_message(user_id, TEXTS["story_rejected"])
 
     bot.edit_message_reply_markup(ADMIN_GROUP_ID, call.message.message_id, reply_markup=None)
-
-# Start polling
-# bot.infinity_polling()
-
 
 # Webhook endpoint
 @app.route('/webhook', methods=['GET', 'POST'])
