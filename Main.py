@@ -262,8 +262,12 @@ def webhook():
     return 'Unsupported content type', 400
 
 # Set webhook on startup
-@app.before_first_request
-def set_webhook():
+from flask import Flask
+
+app = Flask(__name__)
+
+# Run setup code explicitly during app creation
+with app.app_context():
     bot.remove_webhook()
     bot.set_webhook(url=f"{RENDER_URL}/webhook")
 
