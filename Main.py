@@ -253,15 +253,18 @@ def handle_review(call):
 
 
 # Webhook endpoint
-@app.route('/webhook', methods=['POST'])
+@app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        print("Received update:", json_string)  # Log incoming updates
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return 'ok', 200
-    return 'Unsupported content type', 400
+    if request.method == 'GET':
+        return "This is a Telegram bot webhook. Send a POST request here.", 200
+    elif request.method == 'POST':
+        if request.headers.get('content-type') == 'application/json':
+            json_string = request.get_data().decode('utf-8')
+            print("Received update:", json_string)  # Log incoming updates
+            update = telebot.types.Update.de_json(json_string)
+            bot.process_new_updates([update])
+            return 'ok', 200
+        return 'Unsupported content type', 400
 
 # Set webhook when the app starts
 def set_webhook():
