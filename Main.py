@@ -65,6 +65,7 @@ with DatabaseConnection() as cursor:
         user_id INTEGER PRIMARY KEY,
         category TEXT,
         last_activity REAL DEFAULT (strftime('%s', 'now'))
+)
     """)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS posts (
