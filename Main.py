@@ -1,18 +1,18 @@
 import os
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
+from flask import Flask, request
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 import sqlite3
-import time
-import threading
 
 # Load environment variables
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID"))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+RENDER_URL = os.getenv("RENDER_URL")  # e.g., https://your-service-name.onrender.com
 
 bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
 
 # User-facing texts (Amharic)
 TEXTS = {
@@ -249,3 +249,22 @@ def handle_review(call):
 
 # Start polling
 bot.infinity_polling()
+
+# Webhook endpoint
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return 'ok', 200
+    return 'Unsupported content type', 400
+
+# Set webhook on startup
+@app.before_first_request
+def set_webhook():
+    bot.remove_webhook()
+    bot.set_webhook(url=f"{RENDER_URL}/webhook")
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
