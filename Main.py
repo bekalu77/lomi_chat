@@ -10,7 +10,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-RENDER_URL = os.getenv("RENDER_URL")  # e.g., https://your-service-name.onrender.com
+RENDER_URL = os.getenv("RENDER_URL")  # Your Render service URL (e.g., https://your-service-name.onrender.com)
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
@@ -251,25 +251,25 @@ def handle_review(call):
 # Start polling
 # bot.infinity_polling()
 
+
 # Webhook endpoint
 @app.route('/webhook', methods=['POST'])
 def webhook():
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode('utf-8')
+        print("Received update:", json_string)  # Log incoming updates
         update = telebot.types.Update.de_json(json_string)
         bot.process_new_updates([update])
         return 'ok', 200
     return 'Unsupported content type', 400
 
-# Set webhook on startup
-from flask import Flask
-
-app = Flask(__name__)
-
-# Run setup code explicitly during app creation
-with app.app_context():
+# Set webhook when the app starts
+def set_webhook():
     bot.remove_webhook()
     bot.set_webhook(url=f"{RENDER_URL}/webhook")
+
+# Initialize webhook when the app starts
+set_webhook()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
