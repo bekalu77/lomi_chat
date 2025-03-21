@@ -1,279 +1,246 @@
-import logging
 import os
-import sqlite3
-import hashlib
-import secrets
-from uuid import uuid4
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    CallbackQueryHandler
-)
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
 from dotenv import load_dotenv
+import sqlite3
+import time
+import threading
 
-# --- Load Environment Variables ---
+# Load environment variables
 load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID"))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
-# --- Database Setup ---
-conn = sqlite3.connect('users.db', check_same_thread=False)
-cursor = conn.cursor()
+bot = telebot.TeleBot(BOT_TOKEN)
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS users (
-    user_id_hash TEXT PRIMARY KEY,
-    username TEXT UNIQUE,
-    credits INTEGER,
-    is_anonymous BOOLEAN
-)
-''')
-conn.commit()
+# User-facing texts
+TEXTS = {
+    "welcome": "👋 Welcome! Choose a category for your story:",
+    "category_selected": "✍️ Send me your story (text, image, or both), and an admin will review it before posting.",
+    "no_category": "⚠️ Please start with /start to choose a category before sending a story.",
+    "unsupported_format": "⚠️ Unsupported format. Please send photos, videos, or text only.",
+    "too_many_pending": "⚠️ You already have too many pending submissions. Please wait for approval.",
+    "text_too_long": "⚠️ Your text is too long. Please keep it under 4000 characters.",
+    "story_submitted": "Your story has been sent for admin review.",
+    "story_approved": "✅ Your story has been approved and posted to the channel! 🎉",
+    "story_rejected": "❌ Your story was not approved.",
+    "media_group_warning": "⚠️ You can only send one image per post. Please try again with a single image.",
+    "pending_limit": "⚠️ You already have too many pending submissions. Please wait for approval.",
+    "error_occurred": "⚠️ An error occurred. Please try again later.",
+}
 
-# --- Configuration ---
-TOKEN = os.getenv("BOT_TOKEN", "your-bot-token")
-CHANNEL_ID = os.getenv("CHANNEL_ID", "your-channel-id")
-COST_TEXT = int(os.getenv("COST_TEXT", 3))
-COST_MEDIA = int(os.getenv("COST_MEDIA", 5))
-INITIAL_CREDITS = int(os.getenv("INITIAL_CREDITS", 100))
+# Define categories for user selection
+CATEGORIES = {
+    "real": "Ethiopian History",
+    "fiction": "Fiction Stories",
+    "joke": "Jokes",
+    "celebrity": "Celebrity Stories",
+    "others": "Other Stories"
+}
 
-# --- Temporary Storage ---
-pending_posts = {}
-message_collections = {}
+# Dictionary to buffer media group messages
+media_buffer = {}
 
-# --- Helper Functions ---
-def hash_user_id(user_id: int) -> str:
-    return hashlib.sha256(str(user_id).encode()).hexdigest()
-
-def generate_unique_username() -> str:
-    while True:
-        username = f"User{secrets.randbelow(9000) + 1000}"
-        cursor.execute('SELECT username FROM users WHERE username = ?', (username,))
-        if not cursor.fetchone():
-            return username
-
-def get_message(key: str, **kwargs) -> str:
-    raw_message = os.getenv(key, key)
-    return raw_message.replace(r'\n', '\n').format(**kwargs)
-
-# --- Start Command ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id_hash = hash_user_id(user.id)
+# Database setup
+class DatabaseConnection:
+    def __enter__(self):
+        self.conn = sqlite3.connect("bot_data.db", check_same_thread=False)
+        return self.conn.cursor()
     
-    cursor.execute('SELECT * FROM users WHERE user_id_hash = ?', (user_id_hash,))
-    if not cursor.fetchone():
-        username = generate_unique_username()
-        cursor.execute('''
-            INSERT INTO users VALUES (?, ?, ?, ?)
-        ''', (user_id_hash, username, INITIAL_CREDITS, True))
-        conn.commit()
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.conn.commit()
+        self.conn.close()
+
+# Initialize database tables
+with DatabaseConnection() as cursor:
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        category TEXT,
+        last_activity REAL DEFAULT (strftime('%s', 'now'))
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS posts (
+        post_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        category TEXT,
+        status TEXT DEFAULT 'pending')
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS media (
+        media_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_id INTEGER,
+        file_id TEXT,
+        type TEXT)
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS text_content (
+        post_id INTEGER PRIMARY KEY,
+        content TEXT)
+    """)
+
+# Helper functions
+def add_hashtag(text, category):
+    hashtag = f"#{category}"
+    return f"{text}\n\n{hashtag}" if text and hashtag not in text else text
+
+def register_user(user_id):
+    with DatabaseConnection() as cursor:
+        cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+
+def process_media_group(media_group_id):
+    if media_group_id not in media_buffer:
+        return
+
+    data = media_buffer.pop(media_group_id)
+    messages, user_id, category = data['messages'], data['user_id'], data['category']
+    
+    # Check media count
+    media_count = sum(1 for msg in messages if msg.content_type in ['photo', 'video'])
+    if media_count > 1:
+        bot.send_message(user_id, TEXTS["media_group_warning"])
+        return
+
+    # Process valid submission
+    with DatabaseConnection() as cursor:
+        cursor.execute("INSERT INTO posts (user_id, category) VALUES (?, ?)", (user_id, category))
+        post_id = cursor.lastrowid
+
+        text_content = None
+        for msg in messages:
+            if msg.content_type in ['photo', 'video']:
+                file_id = msg.photo[-1].file_id if msg.content_type == 'photo' else msg.video.file_id
+                cursor.execute("INSERT INTO media (post_id, file_id, type) VALUES (?, ?, ?)", 
+                              (post_id, file_id, msg.content_type))
+                if msg.caption:
+                    text_content = msg.caption
+            elif msg.text:
+                text_content = msg.text
+
+        if text_content:
+            cursor.execute("INSERT INTO text_content (post_id, content) VALUES (?, ?)", 
+                          (post_id, add_hashtag(text_content, category)))
+
+    # Notify admins
+    send_for_review(post_id, [m for m in messages if m.content_type in ['photo', 'video']], text_content)
+    bot.send_message(user_id, TEXTS["story_submitted"])
+
+def send_for_review(post_id, media_messages, text):
+    media_group = []
+    for idx, msg in enumerate(media_messages):
+        media = InputMediaPhoto(msg.photo[-1].file_id) if msg.content_type == 'photo' else InputMediaVideo(msg.video.file_id)
+        if idx == 0 and text:
+            media.caption = text
+        media_group.append(media)
+    
+    if media_group:
+        bot.send_media_group(ADMIN_GROUP_ID, media_group)
+    elif text:
+        bot.send_message(ADMIN_GROUP_ID, text)
+
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("✅ Approve", callback_data=f"approve_{post_id}"),
+               InlineKeyboardButton("❌ Reject", callback_data=f"reject_{post_id}"))
+    bot.send_message(ADMIN_GROUP_ID, "Please review the submission:", reply_markup=markup)
+
+# Handlers
+@bot.message_handler(commands=['start'])
+def start(message):
+    register_user(message.chat.id)
+    markup = InlineKeyboardMarkup()
+    [markup.add(InlineKeyboardButton(v, callback_data=k)) for k, v in CATEGORIES.items()]
+    bot.send_message(message.chat.id, TEXTS["welcome"], reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data in CATEGORIES)
+def set_category(call):
+    with DatabaseConnection() as cursor:
+        cursor.execute("UPDATE users SET category = ? WHERE user_id = ?", (call.data, call.message.chat.id))
+    bot.send_message(call.message.chat.id, TEXTS["category_selected"])
+
+@bot.message_handler(content_types=['text', 'photo', 'video'])
+def handle_submission(message):
+    user_id = message.chat.id
+    
+    with DatabaseConnection() as cursor:
+        cursor.execute("SELECT category FROM users WHERE user_id = ?", (user_id,))
+        category = cursor.fetchone()
         
-        await update.message.reply_text(
-            get_message("WELCOME_MESSAGE",
-                username=username,
-                credits=INITIAL_CREDITS
-            )
-        )
-    else:
-        await update.message.reply_text(get_message("ALREADY_REGISTERED_MSG"))
+        if not category or not category[0]:
+            bot.send_message(user_id, TEXTS["no_category"])
+            return
+        
+        cursor.execute("SELECT post_id FROM posts WHERE user_id = ? AND status = 'pending'", (user_id,))
+        if len(cursor.fetchall()) >= 3:
+            bot.send_message(user_id, TEXTS["pending_limit"])
+            return
 
-# --- Balance Command ---
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id_hash = hash_user_id(update.effective_user.id)
-    cursor.execute('SELECT credits FROM users WHERE user_id_hash = ?', (user_id_hash,))
-    result = cursor.fetchone()
-    
-    if result:
-        await update.message.reply_text(
-            get_message("BALANCE_MSG", credits=result[0])
-        )
-    else:
-        await update.message.reply_text(get_message("USER_NOT_REGISTERED_MSG"))
-
-# --- Write Command ---
-async def write_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id_hash = hash_user_id(update.effective_user.id)
-    message_collections[user_id_hash] = []
-    await update.message.reply_text(get_message("WRITE_INSTRUCTIONS"))
-
-# --- Handle Single Post Content ---
-async def handle_single_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id_hash = hash_user_id(update.effective_user.id)
-    
-    if user_id_hash not in message_collections:
-        return
-    
-    message = update.message
-    content_type = 'text'
-    file_id = None
-    cost = COST_TEXT
-    
-    if message.photo:
-        cost = COST_MEDIA
-        content_type = 'photo'
-        file_id = message.photo[-1].file_id
-    elif message.document:
-        cost = COST_MEDIA
-        content_type = 'document'
-        file_id = message.document.file_id
-
-    message_collections[user_id_hash].append({
-        'content': message.text or message.caption,
-        'type': content_type,
-        'file_id': file_id,
-        'cost': cost
-    })
-
-    await update.message.reply_text(
-        get_message("MESSAGE_ADDED_MSG",
-            count=len(message_collections[user_id_hash]),
-            current_cost=sum(msg['cost'] for msg in message_collections[user_id_hash])
-        )
-    )
-
-# --- Done Command ---
-async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id_hash = hash_user_id(update.effective_user.id)
-    messages = message_collections.get(user_id_hash, [])
-    
-    if not messages:
-        await update.message.reply_text(get_message("NO_MESSAGES_MSG"))
-        return
-    
-    total_cost = sum(msg['cost'] for msg in messages)
-    
-    cursor.execute('SELECT credits FROM users WHERE user_id_hash = ?', (user_id_hash,))
-    credits = cursor.fetchone()[0]
-    
-    if credits < total_cost:
-        await update.message.reply_text(
-            get_message("INSUFFICIENT_CREDITS_MSG",
-                cost=total_cost,
-                credits=credits
-            )
-        )
-        del message_collections[user_id_hash]
-        return
-    
-    confirmation_id = str(uuid4())
-    pending_posts[confirmation_id] = {
-        'user_id_hash': user_id_hash,
-        'messages': messages,
-        'total_cost': total_cost,
-        'credits': credits
-    }
-    
-    keyboard = [[
-        InlineKeyboardButton(get_message("CONFIRM_BTN"), callback_data=f"confirm_{confirmation_id}"),
-        InlineKeyboardButton(get_message("CANCEL_BTN"), callback_data=f"cancel_{confirmation_id}")
-    ]]
-    
-    await update.message.reply_text(
-        get_message("BATCH_PREVIEW_TEXT",
-            count=len(messages),
-            total_cost=total_cost
-        ),
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# --- Confirmation Handler ---
-async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    action, confirmation_id = query.data.split('_')
-    post_data = pending_posts.get(confirmation_id)
-    
-    if not post_data:
-        await query.edit_message_text(get_message("POST_EXPIRED_MSG"))
+    # Handle media groups
+    if message.media_group_id:
+        mgid = message.media_group_id
+        if mgid not in media_buffer:
+            media_buffer[mgid] = {
+                'messages': [],
+                'user_id': user_id,
+                'category': category[0],
+                'timer': threading.Timer(1.0, process_media_group, [mgid])
+            }
+            media_buffer[mgid]['timer'].start()
+        media_buffer[mgid]['messages'].append(message)
         return
 
-    try:
-        if action == "confirm":
-            conn.execute("BEGIN TRANSACTION")
+    # Handle single submission
+    with DatabaseConnection() as cursor:
+        cursor.execute("INSERT INTO posts (user_id, category) VALUES (?, ?)", (user_id, category[0]))
+        post_id = cursor.lastrowid
+
+        text_content = message.caption or message.text
+        if text_content:
+            cursor.execute("INSERT INTO text_content VALUES (?, ?)", 
+                          (post_id, add_hashtag(text_content, category[0])))
+        
+        if message.content_type in ['photo', 'video']:
+            file_id = message.photo[-1].file_id if message.content_type == 'photo' else message.video.file_id
+            cursor.execute("INSERT INTO media (post_id, file_id, type) VALUES (?, ?, ?)", 
+                          (post_id, file_id, message.content_type))
+
+    send_for_review(post_id, [message] if message.content_type in ['photo', 'video'] else [], text_content)
+    bot.send_message(user_id, TEXTS["story_submitted"])
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('approve_', 'reject_')))
+def handle_review(call):
+    action, post_id = call.data.split('_')
+    
+    with DatabaseConnection() as cursor:
+        cursor.execute("SELECT user_id, category FROM posts WHERE post_id = ? AND status = 'pending'", (post_id,))
+        result = cursor.fetchone()
+        if not result:
+            return
+
+        user_id, category = result
+        cursor.execute("UPDATE posts SET status = ? WHERE post_id = ?", 
+                      ('approved' if action == 'approve' else 'rejected', post_id))
+
+        if action == 'approve':
+            cursor.execute("SELECT content FROM text_content WHERE post_id = ?", (post_id,))
+            text = cursor.fetchone()
+            text = text[0] if text else f"#{category}"
             
-            # Deduct credits
-            cursor.execute('''
-                UPDATE users 
-                SET credits = credits - ? 
-                WHERE user_id_hash = ?
-            ''', (post_data['total_cost'], post_data['user_id_hash']))
+            cursor.execute("SELECT file_id, type FROM media WHERE post_id = ?", (post_id,))
+            media = cursor.fetchall()
             
-            # Get user info
-            cursor.execute('''
-                SELECT username, is_anonymous 
-                FROM users 
-                WHERE user_id_hash = ?
-            ''', (post_data['user_id_hash'],))
-            username, is_anonymous = cursor.fetchone()
+            if media:
+                media_group = [InputMediaPhoto(m[0]) if m[1] == 'photo' else InputMediaVideo(m[0]) for m in media]
+                media_group[0].caption = text
+                bot.send_media_group(CHANNEL_ID, media_group)
+            else:
+                bot.send_message(CHANNEL_ID, text)
             
-            # Post messages
-            sender = "Anonymous" if is_anonymous else username
-            for msg in post_data['messages']:
-                content = f"{sender}:\n{msg['content']}"
-                if msg['type'] == 'photo':
-                    await context.bot.send_photo(
-                        chat_id=CHANNEL_ID,
-                        photo=msg['file_id'],
-                        caption=content
-                    )
-                elif msg['type'] == 'document':
-                    await context.bot.send_document(
-                        chat_id=CHANNEL_ID,
-                        document=msg['file_id'],
-                        caption=content
-                    )
-                else:
-                    await context.bot.send_message(
-                        chat_id=CHANNEL_ID,
-                        text=content
-                    )
-            
-            conn.commit()
-            await query.edit_message_text(
-                get_message("BATCH_POST_SUCCESS_MSG",
-                    count=len(post_data['messages']),
-                    total_cost=post_data['total_cost']
-                )
-            )
+            bot.send_message(user_id, TEXTS["story_approved"])
         else:
-            await query.edit_message_text(get_message("POST_CANCELLED_MSG"))
-    
-    except Exception as e:
-        conn.rollback()
-        logging.error(f"Error: {str(e)}")
-        await query.edit_message_text(get_message("POST_ERROR_MSG"))
-    
-    finally:
-        if confirmation_id in pending_posts:
-            del pending_posts[confirmation_id]
+            bot.send_message(user_id, TEXTS["story_rejected"])
 
-# --- Help Command ---
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(get_message("HELP_MESSAGE"))
+    bot.edit_message_reply_markup(ADMIN_GROUP_ID, call.message.message_id, reply_markup=None)
 
-# --- Main Application ---
-def main():
-    application = Application.builder().token(TOKEN).build()
-    
-    handlers = [
-        CommandHandler("start", start),
-        CommandHandler("balance", balance),
-        CommandHandler("write", write_command),
-        CommandHandler("done", done_command),
-        CommandHandler("help", help_command),
-        MessageHandler(filters.TEXT | filters.PHOTO | filters.Document.ALL, handle_single_content),
-        CallbackQueryHandler(handle_confirmation)
-    ]
-    
-    for handler in handlers:
-        application.add_handler(handler)
-
-    application.run_polling()
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    main()
+# Start polling
+bot.infinity_polling()
