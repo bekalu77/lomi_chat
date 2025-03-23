@@ -1,25 +1,38 @@
 import os
 import telebot
-from flask import Flask, request
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
 from dotenv import load_dotenv
 import sqlite3
-import logging
+import time
 import threading
 
 # Load environment variables
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID"))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-RENDER_URL = os.getenv("RENDER_URL")  # Your Render service URL (e.g., https://your-service-name.onrender.com)
+ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# Initialize bot and Flask app
-bot = telebot.TeleBot(BOT_TOKEN)
-app = Flask(__name__)
+# Ensure ADMIN_GROUP_ID and CHANNEL_ID are integers
+try:
+    ADMIN_GROUP_ID = int(ADMIN_GROUP_ID)
+    CHANNEL_ID = int(CHANNEL_ID)
+except (ValueError, TypeError) as e:
+    print(f"Error: Invalid chat ID. ADMIN_GROUP_ID and CHANNEL_ID must be integers. Error: {e}")
+    exit(1)
 
-# Enable logging
-logging.basicConfig(level=logging.DEBUG)
+# Initialize bot with increased timeout
+bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=5)
+
+# Debugging: Print chat IDs
+print(f"ADMIN_GROUP_ID: {ADMIN_GROUP_ID}")
+print(f"CHANNEL_ID: {CHANNEL_ID}")
+
+# Test sending a message to ADMIN_GROUP_ID
+try:
+    bot.send_message(ADMIN_GROUP_ID, "Bot started successfully!")
+except telebot.apihelper.ApiTelegramException as e:
+    print(f"Error sending message to ADMIN_GROUP_ID: {e}")
+    exit(1)
 
 # User-facing texts (Amharic)
 TEXTS = {
@@ -27,14 +40,16 @@ TEXTS = {
     "category_selected": "አሁን መፃፋ ይጀምሩ 🗒️🖊️፣ ሲጨርሱ ፁህፉወ ወደ ሳንሱር ይላካል። 📌 ልብ ይበሉ; ካስፈለገ አንድ አንድ ፎቶ ብቻ ይጠቀሙ። መልካም ግዜ",
     "no_category": "ለፁህፉወ ምንም ይዘት አልመረጡም፣ እንደገና ለመጀመር /start ይጫኑ",
     "unsupported_format": "⚠️ እባክወ ፎቶ ወይም ቪዲዬ ብቻ ይጠቀሙ እና እንደገና ይሞክሩ  /start",
-    "too_many_pending": "⚠️ �ሳንሱር የተላኩ ብዙ ፁህፎች ስላልወት ትንሽ ቆይተዉ ይሞክሩ",
-    "text_too_long": "⚠️ ፁህፋዎ ከ 4000 ፊደላት በላይ ስለሆነ ድጋሚ አስተካክለዉ በ /start ይሞክሩ",
+    "too_many_pending": "⚠️ ለሳንሱር የተላኩ ብዙ ፁህፎች ስላልወት ትንሽ ቆይተዉ ይሞክሩ",
+    "text_too_long": "⚠️ ፁህፋዎ ከ 4000 ፊደላት በላይ �ለሆነ ድጋሚ አስተካክለዉ በ /start ይሞክሩ",
     "story_submitted": "ፁህፋወ ለሳንሱር ተልኳል፣ እባክወ በትግስት ይጠብቁ",
     "story_approved": "✅ ፁህፋወ በ @lomi_reads ቻናል ላይ ተለጥፏል 🎉 ሌላ ለመፃፍ /start ብለዉ ይጀምሩ",
     "story_rejected": "❌ ፁሁፍወ ሳንሱር አላለፈም እንደገና ይሞክሩ /start .",
     "media_group_warning": "⚠️እባክወ በአንድ ፁህፋ ከ አንድ በላይ ፎቶ ወይም ቪዲዬ አይጠቀሙ እና እንደገና ይሞክሩ /start",
     "pending_limit": "⚠️ ለሳንሱር የተላኩ ብዙ ፁህፎች ስላልወት ትንሽ ቆይተዉ ይሞክሩ",
     "error_occurred": "⚠️ የሢሥተም ችግር አጋጥሟል። እባክዎ ትንሽ ቆይተዉ ይሞክሩ",
+    "write_command": "📝 እባክዎ የፁሁፍዎን ይዘት ለመላክ /write ይጠቀሙ።",
+    "write_reminder": "⚠️ እባክዎ የፁሁፍዎን ይዘት ለመላክ /write ይጠቀሙ።",
 }
 
 # Define categories for user selection
@@ -53,33 +68,35 @@ CATEGORIES = {
 # Dictionary to buffer media group messages
 media_buffer = {}
 
+# Track user states
+user_states = {}
+
 # Database setup
 class DatabaseConnection:
     def __enter__(self):
         self.conn = sqlite3.connect("bot_data.db", check_same_thread=False)
-        logging.debug("Connected to database.")
         return self.conn.cursor()
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.conn.commit()
         self.conn.close()
-        logging.debug("Database connection closed.")
 
 # Initialize database tables
 with DatabaseConnection() as cursor:
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        category TEXT,
-        last_activity REAL DEFAULT (strftime('%s', 'now'))
-)
-    """)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS posts (
         post_id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         category TEXT,
-        status TEXT DEFAULT 'pending')
+        status TEXT DEFAULT 'pending'
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        category TEXT,
+        last_activity REAL DEFAULT (strftime('%s', 'now'))
+    )
     """)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS media (
@@ -102,7 +119,6 @@ def add_hashtag(text, category):
 def register_user(user_id):
     with DatabaseConnection() as cursor:
         cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-    logging.debug(f"Registered user: {user_id}")
 
 def process_media_group(media_group_id):
     if media_group_id not in media_buffer:
@@ -142,40 +158,56 @@ def process_media_group(media_group_id):
     bot.send_message(user_id, TEXTS["story_submitted"])
 
 def send_for_review(post_id, media_messages, text):
-    media_group = []
-    for idx, msg in enumerate(media_messages):
-        media = InputMediaPhoto(msg.photo[-1].file_id) if msg.content_type == 'photo' else InputMediaVideo(msg.video.file_id)
-        if idx == 0 and text:
-            media.caption = text
-        media_group.append(media)
-    
-    if media_group:
-        bot.send_media_group(ADMIN_GROUP_ID, media_group)
-    elif text:
-        bot.send_message(ADMIN_GROUP_ID, text)
+    try:
+        media_group = []
+        for idx, msg in enumerate(media_messages):
+            media = InputMediaPhoto(msg.photo[-1].file_id) if msg.content_type == 'photo' else InputMediaVideo(msg.video.file_id)
+            if idx == 0 and text:
+                media.caption = text
+            media_group.append(media)
+        
+        if media_group:
+            bot.send_media_group(ADMIN_GROUP_ID, media_group)
+        elif text:
+            bot.send_message(ADMIN_GROUP_ID, text)
 
-    markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("✅ Approve", callback_data=f"approve_{post_id}"),
-               InlineKeyboardButton("❌ Reject", callback_data=f"reject_{post_id}"))
-    bot.send_message(ADMIN_GROUP_ID, "Please review the submission:", reply_markup=markup)
+        markup = InlineKeyboardMarkup()
+        markup.row(InlineKeyboardButton("✅ Approve", callback_data=f"approve_{post_id}"),
+                   InlineKeyboardButton("❌ Reject", callback_data=f"reject_{post_id}"))
+        bot.send_message(ADMIN_GROUP_ID, "Please review the submission:", reply_markup=markup)
+    except Exception as e:
+        print(f"Error in send_for_review: {e}")
 
 # Handlers
 @bot.message_handler(commands=['start'])
 def start(message):
-    logging.debug(f"Received /start command from user: {message.from_user.username}")
     register_user(message.chat.id)
     markup = InlineKeyboardMarkup()
     [markup.add(InlineKeyboardButton(v, callback_data=k)) for k, v in CATEGORIES.items()]
     bot.send_message(message.chat.id, TEXTS["welcome"], reply_markup=markup)
-    logging.debug("Sent welcome message to user.")
 
-@bot.callback_query_handler(func=lambda call: call.data in CATEGORIES)
+@bot.message_handler(commands=['write'])
+def write(message):
+    user_id = message.chat.id
+    user_states[user_id] = "writing"
+    markup = InlineKeyboardMarkup()
+    [markup.add(InlineKeyboardButton(v, callback_data=k)) for k, v in CATEGORIES.items()]
+    bot.send_message(user_id, TEXTS["category_selected"], reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data in CATEGORIES.keys())
 def set_category(call):
+    user_id = call.message.chat.id
+    category = call.data
     with DatabaseConnection() as cursor:
-        cursor.execute("UPDATE users SET category = ? WHERE user_id = ?", (call.data, call.message.chat.id))
-    bot.send_message(call.message.chat.id, TEXTS["category_selected"])
+        cursor.execute("UPDATE users SET category = ? WHERE user_id = ?", (category, user_id))
+    bot.send_message(user_id, TEXTS["category_selected"])
+    user_states[user_id] = "writing"  # Allow user to submit content
 
-@bot.message_handler(content_types=['text', 'photo', 'video'])
+@bot.message_handler(func=lambda message: user_states.get(message.chat.id) != "writing")
+def remind_to_write(message):
+    bot.send_message(message.chat.id, TEXTS["write_reminder"])
+
+@bot.message_handler(content_types=['text', 'photo', 'video'], func=lambda message: user_states.get(message.chat.id) == "writing")
 def handle_submission(message):
     user_id = message.chat.id
     
@@ -223,6 +255,7 @@ def handle_submission(message):
 
     send_for_review(post_id, [message] if message.content_type in ['photo', 'video'] else [], text_content)
     bot.send_message(user_id, TEXTS["story_submitted"])
+    user_states[user_id] = None  # Reset state after submission
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('approve_', 'reject_')))
 def handle_review(call):
@@ -258,29 +291,6 @@ def handle_review(call):
             bot.send_message(user_id, TEXTS["story_rejected"])
 
     bot.edit_message_reply_markup(ADMIN_GROUP_ID, call.message.message_id, reply_markup=None)
-
-# Webhook endpoint
-@app.route('/webhook', methods=['GET', 'POST'])
-def webhook():
-    if request.method == 'GET':
-        return "This is a Telegram bot webhook. Send a POST request here.", 200
-    elif request.method == 'POST':
-        if request.headers.get('content-type') == 'application/json':
-            json_string = request.get_data().decode('utf-8')
-            logging.debug("Received update: %s", json_string)  # Log incoming updates
-            update = telebot.types.Update.de_json(json_string)
-            bot.process_new_updates([update])
-            return 'ok', 200
-        return 'Unsupported content type', 400
-
-# Set webhook when the app starts
-def set_webhook():
-    bot.remove_webhook()
-    bot.set_webhook(url=f"{RENDER_URL}/webhook")
-
-# Initialize webhook when the app starts
-set_webhook()
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))  # Use PORT if provided, otherwise default to 10000
-    app.run(host='0.0.0.0', port=port)
+bot.remove_webhook()
+# Start polling
+bot.infinity_polling(timeout=60)  # Increased timeout to 60 seconds
