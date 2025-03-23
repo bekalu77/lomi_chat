@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import sqlite3
 import time
 import threading
-
+from flask import Flask, request
 # Load environment variables
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -291,6 +291,20 @@ def handle_review(call):
             bot.send_message(user_id, TEXTS["story_rejected"])
 
     bot.edit_message_reply_markup(ADMIN_GROUP_ID, call.message.message_id, reply_markup=None)
-bot.remove_webhook()
+#bot.remove_webhook()
 # Start polling
-bot.infinity_polling(timeout=60)  # Increased timeout to 60 seconds
+#bot.infinity_polling(timeout=60)  # Increased timeout to 60 seconds
+
+app = Flask(__name__)
+
+@app.route('/' + BOT_TOKEN, methods=['POST'])
+def webhook():
+    update = telebot.types.Update.de_json(request.stream.read().decode('utf-8'))
+    bot.process_new_updates([update])
+    return 'OK', 200
+
+if __name__ == '__main__':
+    bot.remove_webhook()
+    time.sleep(1)  # Wait a second for the webhook to be removed
+    bot.set_webhook(url=f'https://your_pythonanywhere_username.pythonanywhere.com/{BOT_TOKEN}')
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
