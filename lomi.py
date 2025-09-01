@@ -4,14 +4,18 @@ import logging
 from typing import Dict, Optional
 from enum import Enum
 from datetime import datetime
-
+ 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
     ContextTypes, CallbackQueryHandler, filters
 )
 from dotenv import load_dotenv
+from flask import Flask, request
+import threading
 
+# Create a Flask app
+app = Flask(__name__)
 # Load environment variables
 load_dotenv()
 
@@ -737,10 +741,48 @@ def main():
     
     application.add_error_handler(error_handler)
     
+    # Set up webhook for Render deployment
+    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 5000)),
+        url_path=TOKEN,
+        webhook_url=webhook_url
+    )
+
+# Add a health check endpoint for Render
+@app.route('/health')
+def health_check():
+    return 'OK', 200
+
+# Add a simple homepage
+@app.route('/')
+def home():
+    return 'LomiTalk Bot is running!'
+
+# Webhook handler for Telegram
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(), application.bot)
+    application.process_update(update)
+    return 'OK'
+
+# Start the bot when running as a script
+if __name__ == "__main__":
+    # Start the Flask app in a separate thread
+    flask_thread = threading.Thread(
+        target=lambda: app.run(
+            host='0.0.0.0',
+            port=int(os.environ.get('PORT', 5000)),
+            debug=False,
+            use_reloader=False
+        )
+    )
+    flask_thread.daemon = True
+    flask_thread.start()
+    
     # Start the bot
     print("Bot is running...")
-    application.run_polling()
-
-if __name__ == "__main__":
     main()
+
 
