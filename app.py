@@ -109,7 +109,7 @@ def get_user_data(user_id) -> Dict:
             user_data['in_conversation'] = bool(user_data['in_conversation'])
             user_data['is_initiator'] = bool(user_data['is_initiator'])
             if user_data['conversation_partner']:
-                user_data['conversation_partner'] = int(user_data['conversation_partner'])
+                user_data['conversation_partner'] = safe_int(user_data.get('conversation_partner'))
             return user_data
         return {}
     except sqlite3.Error:
@@ -238,7 +238,7 @@ def find_partner(user_id):
     return None
 
 # --------------------
-# Bot handlers
+# Bot handlers 
 # --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -649,6 +649,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_video(chat_id=partner_id, video=video_file.file_id)
     else:
         await update.message.reply_text("You're not in a conversation. Use /find to find a partner to chat with.")
+        
+def safe_int(value):
+    if value is None or str(value).lower() == "none":
+        return None
+    return int(value)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -729,4 +734,5 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
 
