@@ -1,38 +1,50 @@
 import os
 import json
 import logging
-from typing import Dict, Optional
+import traceback
 from enum import Enum
 from datetime import datetime
 from flask import Flask, request
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Updater, CommandHandler, MessageHandler, 
-    CallbackQueryHandler, Filters, CallbackContext
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes,
 )
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables from .env file for local development
 load_dotenv()
+
+# --- Configuration & Setup ---
 
 # Enable logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Bot token from environment
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# Bot token from environment variable
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("No TELEGRAM_BOT_TOKEN found in environment variables")
+
+# --- IMPORTANT: Data Persistence Warning for Render ---
+# Render's filesystem is ephemeral, meaning this JSON file will be lost on every deploy or restart.
+# For production, you MUST use a persistent storage solution.
+# 1. Render Disks: Mount a persistent disk to your service to save this file.
+# 2. Database: Use a service like Redis, PostgreSQL (available on Render), or another database.
+USER_DATA_FILE = os.path.join(os.getenv("RENDER_DISK_PATH", "."), "user_data.json")
 
 # Create Flask app
 app = Flask(__name__)
 
-# User data storage (in production, use a proper database)
-USER_DATA_FILE = 'user_data.json'
+# --- Enums and Data Models ---
 
-# Age groups
 class AgeGroup(Enum):
     UNDER_18 = "Under 18"
     AGE_18_24 = "18-24"
@@ -40,38 +52,30 @@ class AgeGroup(Enum):
     AGE_35_44 = "35-44"
     AGE_45_PLUS = "45+"
 
-# Gender options (only Male and Female)
 class Gender(Enum):
     MALE = "Male"
     FEMALE = "Female"
 
-# Conversation states
-class State(Enum):
-    PROFILE_GENDER = 1
-    PROFILE_NICKNAME = 2
-    PROFILE_AGE = 3
-    CHATTING = 4
+# --- Data Handling Functions ---
 
-# Load user data from file
-def load_user_data():
+def load_user_data() -> dict:
     try:
-        with open(USER_DATA_FILE, 'r') as f:
+        with open(USER_DATA_FILE, "r") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
-# Save user data to file
-def save_user_data(data):
-    with open(USER_DATA_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
+def save_user_data(data: dict):
+    # Ensure the directory exists if a path is specified (like on a Render Disk)
+    os.makedirs(os.path.dirname(USER_DATA_FILE), exist_ok=True)
+    with open(USER_DATA_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
-# Get user data
-def get_user_data(user_id):
+def get_user_data(user_id: int) -> dict:
     data = load_user_data()
     return data.get(str(user_id), {})
 
-# Update user data
-def update_user_data(user_id, updates):
+def update_user_data(user_id: int, updates: dict):
     data = load_user_data()
     user_id_str = str(user_id)
     if user_id_str not in data:
@@ -79,87 +83,81 @@ def update_user_data(user_id, updates):
     data[user_id_str].update(updates)
     save_user_data(data)
 
-# Find a partner for the user with preferences
-def find_partner(user_id):
+# --- Core Bot Logic ---
+
+def find_partner(user_id: int) -> int | None:
     user_data = get_user_data(user_id)
-    if not user_data.get('in_pool', False):
-        return None
-    
     all_users = load_user_data()
-    user_pref_gender = user_data.get('preferred_gender')
-    user_pref_age = user_data.get('preferred_age_group')
+    user_pref_gender = user_data.get("preferred_gender")
+    user_pref_age = user_data.get("preferred_age_group")
     user_id_str = str(user_id)
-    
+
     for uid, data in all_users.items():
-        if (uid != user_id_str and 
-            data.get('in_pool', False) and 
-            not data.get('in_conversation', False) and
-            data.get('profile_complete', False)):
-            
-            # Check gender preference
-            if user_pref_gender and user_pref_gender != data.get('gender'):
+        if (
+            uid != user_id_str
+            and data.get("in_pool", False)
+            and not data.get("in_conversation", False)
+            and data.get("profile_complete", False)
+        ):
+            if user_pref_gender and user_pref_gender != data.get("gender"):
                 continue
-            
-            # Check age group preference
-            if user_pref_age and user_pref_age != data.get('age_group'):
+            if user_pref_age and user_pref_age != data.get("age_group"):
                 continue
-            
-            return int(uid)  # Convert back to integer for return
-    
+            return int(uid)
     return None
 
-# Start command
+# --- Command Handlers ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
     user_data = get_user_data(user_id)
-    
+
     if not user_data:
-        # New user - initialize with free points
-        update_user_data(user_id, {
-            'points': 1000,
-            'profile_complete': False,
-            'in_pool': False,
-            'in_conversation': False,
-            'conversation_partner': None,
-            'joined_date': datetime.now().isoformat(),
-            'username': update.effective_user.username  # Store username for reference
-        })
+        update_user_data(
+            user_id,
+            {
+                "points": 1000,
+                "profile_complete": False,
+                "in_pool": False,
+                "in_conversation": False,
+                "conversation_partner": None,
+                "joined_date": datetime.now().isoformat(),
+                "username": user.username,
+            },
+        )
         await update.message.reply_text(
             "👋 Welcome to LomiTalk!\n\n"
             "You've received 1000 free points to start with. "
-            "Complete your profile to begin matching with partners.\n\n"
+            "Complete your profile to begin matching.\n\n"
             "Use /profile to set up your profile."
         )
     else:
-        # Update username if it's not stored or has changed
-        current_username = update.effective_user.username
-        if user_data.get('username') != current_username:
-            update_user_data(user_id, {'username': current_username})
-            
+        if user_data.get("username") != user.username:
+            update_user_data(user_id, {"username": user.username})
         await update.message.reply_text(
             "Welcome back to LomiTalk!\n\n"
             f"Your current points: {user_data.get('points', 0)}\n"
             "Use /help to see all available commands."
         )
 
-# Help command
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
 🤖 LomiTalk Help Guide
 
 💡 How it works:
-- Complete your profile with sex, nickname, and age group
-- Join the pool ✅ for FREE to earn points
-- Use /find to choose preferences and find a partner 🔍
-- Chat with your partner 💬
-- The person who initiates the conversation PAYS 1 point per character sent
-- The person selected from the pool EARNS 1 point per character received
+- Complete your profile with sex, nickname, and age group.
+- Join the pool ✅ for FREE to earn points.
+- Use /find to choose preferences and find a partner 🔍.
+- Chat with your partner 💬.
+- The person who initiates the conversation PAYS 1 point per character sent.
+- The person selected from the pool EARNS 1 point per character received.
 
 💰 Payment System:
-- Initiator: PAYS 1 point per character sent
-- Partner: EARNS 1 point per character received
-- Images: 150 points, Videos: 250 points
-- No points created or destroyed - only transferred
+- Initiator: PAYS 1 point per character sent.
+- Partner: EARNS 1 point per character received.
+- Images: 150 points, Videos: 250 points.
+- No points created or destroyed - only transferred.
 
 ⚡️ Commands:
 /start - Register and get 1000 free points
@@ -172,608 +170,277 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /transact - Deposit or withdraw points
 /help - Show this help menu
 /report - Report a user for inappropriate behavior
-
-🎯 Tips:
-- Complete your profile to get better matches
-- Use specific preferences for better matches
-- Stay in the pool to earn while you wait
-- Be active to get found by others
-- Longer conversations = more earnings!
     """
     await update.message.reply_text(help_text)
 
-# Profile command
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = get_user_data(user_id)
-    
     if not user_data:
-        await update.message.reply_text("Please use /start first to initialize your account.")
+        await update.message.reply_text("Please use /start first.")
         return
-    
-    # Check if we're in the middle of profile setup
-    if context.user_data.get('setting_up_profile'):
+
+    if context.user_data.get("state", "").startswith("PROFILE_"):
         await update.message.reply_text("Please complete your current profile setup first.")
         return
-    
-    # Show current profile if exists
-    if user_data.get('profile_complete'):
-        profile_text = f"""
-📋 Your Profile:
-Nickname: {user_data.get('nickname', 'Not set')}
-Gender: {user_data.get('gender', 'Not set')}
-Age Group: {user_data.get('age_group', 'Not set')}
-Preferred Gender: {user_data.get('preferred_gender', 'Any')}
-Preferred Age Group: {user_data.get('preferred_age_group', 'Any')}
-        """
-        keyboard = [
-            [InlineKeyboardButton("Edit Profile", callback_data="edit_profile")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(profile_text, reply_markup=reply_markup)
+
+    if user_data.get("profile_complete"):
+        profile_text = (
+            f"📋 Your Profile:\n"
+            f"Nickname: {user_data.get('nickname', 'Not set')}\n"
+            f"Gender: {user_data.get('gender', 'Not set')}\n"
+            f"Age Group: {user_data.get('age_group', 'Not set')}\n"
+            f"Preferred Gender: {user_data.get('preferred_gender', 'Any')}\n"
+            f"Preferred Age Group: {user_data.get('preferred_age_group', 'Any')}"
+        )
+        keyboard = [[InlineKeyboardButton("Edit Profile", callback_data="edit_profile")]]
+        await update.message.reply_text(profile_text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        # Start profile setup
-        context.user_data['setting_up_profile'] = True
-        context.user_data['profile_setup_step'] = 'gender'
-        
-        # Only show Male and Female options for profile setup
+        # Start profile setup from scratch
+        context.user_data["state"] = "PROFILE_GENDER"
         keyboard = [
             [InlineKeyboardButton("♂️ Male", callback_data="gender_MALE")],
             [InlineKeyboardButton("♀️ Female", callback_data="gender_FEMALE")],
             [InlineKeyboardButton("Skip for now", callback_data="gender_skip")]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "Let's set up your profile!\n\nFirst, select your gender:",
-            reply_markup=reply_markup
-        )
+        await update.message.reply_text("Let's set up your profile!\n\nFirst, select your gender:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Points command
 async def points(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = get_user_data(user_id)
-    
-    if not user_data:
-        await update.message.reply_text("Please use /start first to initialize your account.")
-        return
-    
     await update.message.reply_text(f"💰 Your current points balance: {user_data.get('points', 0)}")
 
-# Join pool command
 async def join_pool(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = get_user_data(user_id)
-    
-    if not user_data:
-        await update.message.reply_text("Please use /start first to initialize your account.")
+    if not user_data.get("profile_complete"):
+        await update.message.reply_text("Please complete your profile with /profile before joining.")
         return
-    
-    if not user_data.get('profile_complete'):
-        await update.message.reply_text("Please complete your profile with /profile before joining the pool.")
-        return
-    
-    if user_data.get('in_pool'):
+    if user_data.get("in_pool"):
         await update.message.reply_text("You're already in the pool!")
         return
-    
-    update_user_data(user_id, {'in_pool': True})
-    await update.message.reply_text("✅ You've joined the pool! You can now be matched with other users.")
+    update_user_data(user_id, {"in_pool": True})
+    await update.message.reply_text("✅ You've joined the pool and can now be matched.")
 
-# Leave pool command
 async def leave_pool(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_data = get_user_data(user_id)
-    
-    if not user_data:
-        await update.message.reply_text("Please use /start first to initialize your account.")
-        return
-    
-    if not user_data.get('in_pool'):
-        await update.message.reply_text("You're not in the pool.")
-        return
-    
-    update_user_data(user_id, {'in_pool': False})
-    await update.message.reply_text("You've left the pool. You will no longer be matched with partners.")
+    update_user_data(user_id, {"in_pool": False})
+    await update.message.reply_text("You've left the pool.")
 
-# Find partner command
 async def find_partner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = get_user_data(user_id)
-    
-    if not user_data:
-        await update.message.reply_text("Please use /start first to initialize your account.")
+    if not user_data.get("profile_complete"):
+        await update.message.reply_text("Please complete your profile with /profile first.")
+        return
+    if user_data.get("in_conversation"):
+        await update.message.reply_text("You're already in a conversation! Use /end to end it.")
         return
     
-    if not user_data.get('profile_complete'):
-        await update.message.reply_text("Please complete your profile with /profile before finding a partner.")
-        return
-    
-    if not user_data.get('in_pool'):
-        await update.message.reply_text("You need to join the pool first with /join.")
-        return
-    
-    if user_data.get('in_conversation'):
-        await update.message.reply_text("You're already in a conversation! Use /end to end it first.")
-        return
-    
-    # Ask for gender preference (only Male and Female options)
     keyboard = [
         [InlineKeyboardButton("♂️ Male", callback_data="pref_gender_MALE")],
         [InlineKeyboardButton("♀️ Female", callback_data="pref_gender_FEMALE")],
-        [InlineKeyboardButton("Any gender", callback_data="pref_gender_ANY")]
+        [InlineKeyboardButton("Any gender", callback_data="pref_gender_ANY")],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "👥 Choose your preferred gender for matching:",
-        reply_markup=reply_markup
-    )
-    
-    context.user_data['finding_partner'] = True
+    await update.message.reply_text("👥 Choose your preferred gender for matching:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Handle gender preference selection
-async def handle_gender_preference(update: Update, context: ContextTypes.DEFAULT_TYPE, gender_pref):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = update.effective_user.id
-    
-    if gender_pref == "ANY":
-        update_user_data(user_id, {'preferred_gender': None})
-    else:
-        update_user_data(user_id, {'preferred_gender': Gender[gender_pref].value})
-    
-    # Now ask for age group preference
-    keyboard = [
-        [InlineKeyboardButton("👶 Under 18", callback_data="pref_age_UNDER_18")],
-        [InlineKeyboardButton("👦 18-24", callback_data="pref_age_AGE_18_24")],
-        [InlineKeyboardButton("👨 25-34", callback_data="pref_age_AGE_25_34")],
-        [InlineKeyboardButton("🧔 35-44", callback_data="pref_age_AGE_35_44")],
-        [InlineKeyboardButton("👴 45+", callback_data="pref_age_AGE_45_PLUS")],
-        [InlineKeyboardButton("🎯 Any age", callback_data="pref_age_ANY")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "🎂 Choose your preferred age group for matching:",
-        reply_markup=reply_markup
-    )
+async def _end_conversation_logic(user_id: int, partner_id: int | None, context: ContextTypes.DEFAULT_TYPE):
+    """Helper function to end conversation for both users."""
+    update_user_data(user_id, {"in_conversation": False, "conversation_partner": None, "is_initiator": None})
+    if partner_id:
+        update_user_data(partner_id, {"in_conversation": False, "conversation_partner": None, "is_initiator": None})
+        return True
+    return False
 
-# Handle age preference selection and start searching
-async def handle_age_preference(update: Update, context: ContextTypes.DEFAULT_TYPE, age_pref):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = update.effective_user.id
-    
-    if age_pref == "ANY":
-        update_user_data(user_id, {'preferred_age_group': None})
-    else:
-        update_user_data(user_id, {'preferred_age_group': AgeGroup[age_pref].value})
-    
-    # Start searching for partner with preferences
-    await query.edit_message_text("🔍 Searching for a partner based on your preferences...")
-    
-    partner_id = find_partner(user_id)
-    if not partner_id:
-        await query.edit_message_text("❌ No available partners found matching your preferences at the moment. Please try again later.")
-        context.user_data.pop('finding_partner', None)
-        return
-    
-    # Start conversation
-    update_user_data(user_id, {
-        'in_conversation': True,
-        'conversation_partner': partner_id,
-        'is_initiator': True
-    })
-    
-    user_data = get_user_data(user_id)
-    partner_data = get_user_data(partner_id)
-    update_user_data(partner_id, {
-        'in_conversation': True,
-        'conversation_partner': user_id,
-        'is_initiator': False
-    })
-    
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=f"✅ You've been matched with {partner_data.get('nickname')}! Start chatting now.\n\n"
-             "Remember: You pay 1 point per character sent."
-    )
-    
-    await context.bot.send_message(
-        chat_id=partner_id,
-        text=f"✅ You've been matched with {user_data.get('nickname')}! Start chatting now.\n\n"
-             "Remember: You earn 1 point per character received."
-    )
-    
-    context.user_data.pop('finding_partner', None)
-
-# End conversation command
 async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = get_user_data(user_id)
-    
-    if not user_data.get('in_conversation'):
+    if not user_data.get("in_conversation"):
         await update.message.reply_text("You're not in a conversation.")
         return
-    
-    partner_id = user_data.get('conversation_partner')
-    
-    # End conversation for both users
-    update_user_data(user_id, {
-        'in_conversation': False,
-        'conversation_partner': None,
-        'is_initiator': False
-    })
-    
-    if partner_id:
-        update_user_data(partner_id, {
-            'in_conversation': False,
-            'conversation_partner': None,
-            'is_initiator': False
-        })
-        
-        await context.bot.send_message(
-            chat_id=partner_id,
-            text="❌ Your partner has ended the conversation."
-        )
-    
-    await update.message.reply_text("Conversation ended. Use /find to find a new partner.")
 
-# Report command
+    partner_id = user_data.get("conversation_partner")
+    if await _end_conversation_logic(user_id, partner_id, context):
+         await context.bot.send_message(chat_id=partner_id, text="❌ Your partner has ended the conversation.")
+    
+    await update.message.reply_text("Conversation ended. Use /find to start a new one.")
+
 async def report_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = get_user_data(user_id)
-    
-    if not user_data.get('in_conversation'):
-        await update.message.reply_text("You need to be in a conversation to report a user.")
+    if not user_data.get("in_conversation"):
+        await update.message.reply_text("You must be in a conversation to report a user.")
         return
-    
-    partner_id = user_data.get('conversation_partner')
-    if not partner_id:
-        await update.message.reply_text("No conversation partner found.")
-        return
-    
-    # In a real implementation, you would log the report and potentially take action
-    await update.message.reply_text(
-        "Thank you for your report. We will review it and take appropriate action.\n\n"
-        "Your conversation has been ended."
-    )
-    
-    # End the conversation
-    update_user_data(user_id, {
-        'in_conversation': False,
-        'conversation_partner': None,
-        'is_initiator': False
-    })
-    
-    update_user_data(partner_id, {
-        'in_conversation': False,
-        'conversation_partner': None,
-        'is_initiator': False
-    })
-    
-    await context.bot.send_message(
-        chat_id=partner_id,
-        text="❌ Your conversation has been ended due to a report."
-    )
 
-# Transaction command for deposits and withdrawals
+    partner_id = user_data.get("conversation_partner")
+    logger.warning(f"User {user_id} reported partner {partner_id}.")
+
+    if await _end_conversation_logic(user_id, partner_id, context):
+        await context.bot.send_message(chat_id=partner_id, text="❌ Your conversation has been ended due to a report.")
+    
+    await update.message.reply_text("Thank you for your report. The conversation has been ended.")
+
 async def transact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
-💳 Transaction Information
+    await update.message.reply_text(
+        "💳 For deposits or withdrawals, please contact our admin team: @busi_admin"
+    )
 
-For deposits (adding points to your account) or withdrawals (cashing out your points), please contact our admin team.
+# --- Callback & Message Handlers ---
 
-📧 Contact: @busi_admin
-
-We accept various payment methods and will process your transactions promptly.
-
-⚠️ Important:
-- Always verify you're contacting the official admin (@busi_admin)
-- Never share your password with anyone
-- Transactions are typically processed within 24 hours
-- Minimum withdrawal amount: 100 points
-    """
-    await update.message.reply_text(help_text)
-
-# Handle button callbacks
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
-    user_id = update.effective_user.id
-    user_data = get_user_data(user_id)
-    
-    if query.data == "edit_profile":
-        context.user_data['setting_up_profile'] = True
-        context.user_data['profile_setup_step'] = 'gender'
-        
-        # Only show Male and Female options for profile editing
+    user_id = query.from_user.id
+    data = query.data
+
+    if data == "edit_profile":
+        context.user_data["state"] = "PROFILE_GENDER"
         keyboard = [
             [InlineKeyboardButton("♂️ Male", callback_data="gender_MALE")],
             [InlineKeyboardButton("♀️ Female", callback_data="gender_FEMALE")],
-            [InlineKeyboardButton("Skip for now", callback_data="gender_skip")]
+            [InlineKeyboardButton("Keep Current", callback_data="gender_skip")]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            "Let's update your profile!\n\nFirst, select your gender:",
-            reply_markup=reply_markup
-        )
-        return
-    
-    if query.data.startswith("gender_"):
-        if query.data == "gender_skip":
-            # Keep existing gender if skipping
-            pass
-        else:
-            # Extract gender name correctly
-            gender_name = query.data.replace("gender_", "")
-            gender = Gender[gender_name].value
-            update_user_data(user_id, {'gender': gender})
-        
-        context.user_data['profile_setup_step'] = 'nickname'
-        await query.edit_message_text(
-            "Great! Now please send me your nickname:"
-        )
-        return
+        await query.edit_message_text("Let's update your profile!\n\nSelect your gender:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    if query.data.startswith("age_"):
-        if query.data == "age_skip":
-            # Keep existing age group if skipping
-            pass
-        else:
-            # Extract age group name correctly
-            age_group_name = query.data.replace("age_", "")
-            age_group = AgeGroup[age_group_name].value
-            update_user_data(user_id, {'age_group': age_group})
-        
-        # Profile setup complete
-        update_user_data(user_id, {'profile_complete': True})
-        context.user_data['setting_up_profile'] = False
-        
-        await query.edit_message_text(
-            "✅ Your profile is now complete!\n\n"
-            "You can now join the pool with /join and start finding partners with /find."
-        )
-        return
-    
-    # Handle gender preference selection
-    if query.data.startswith("pref_gender_"):
-        gender_pref = query.data.replace("pref_gender_", "")
-        await handle_gender_preference(update, context, gender_pref)
-        return
-    
-    # Handle age preference selection
-    if query.data.startswith("pref_age_"):
-        age_pref = query.data.replace("pref_age_", "")
-        await handle_age_preference(update, context, age_pref)
-        return
+    elif data.startswith("gender_"):
+        if data != "gender_skip":
+            gender = Gender[data.split("_")[1]].value
+            update_user_data(user_id, {"gender": gender})
+        context.user_data["state"] = "PROFILE_NICKNAME"
+        await query.edit_message_text("Great! Now please send me your nickname:")
 
-# Handle regular messages and media
+    elif data.startswith("age_"):
+        if data != "age_skip":
+            age_group = AgeGroup[data.split("_")[1]].value
+            update_user_data(user_id, {"age_group": age_group})
+        update_user_data(user_id, {"profile_complete": True})
+        context.user_data.pop("state", None)
+        await query.edit_message_text("✅ Your profile is complete!\nUse /join and /find to connect.")
+
+    elif data.startswith("pref_gender_"):
+        pref = data.split("_")[-1]
+        update_user_data(user_id, {"preferred_gender": Gender[pref].value if pref != "ANY" else None})
+        keyboard = [[InlineKeyboardButton(a.value, callback_data=f"pref_age_{a.name}")] for a in AgeGroup]
+        keyboard.append([InlineKeyboardButton("🎯 Any age", callback_data="pref_age_ANY")])
+        await query.edit_message_text("🎂 Choose your preferred age group:", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    elif data.startswith("pref_age_"):
+        pref = data.split("_")[-1]
+        update_user_data(user_id, {"preferred_age_group": AgeGroup[pref].value if pref != "ANY" else None})
+        await query.edit_message_text("🔍 Searching for a partner...")
+
+        partner_id = find_partner(user_id)
+        if partner_id:
+            user_data = get_user_data(user_id)
+            partner_data = get_user_data(partner_id)
+            
+            update_user_data(user_id, {"in_conversation": True, "conversation_partner": partner_id, "is_initiator": True})
+            update_user_data(partner_id, {"in_conversation": True, "conversation_partner": user_id, "is_initiator": False})
+
+            await context.bot.send_message(user_id, f"✅ Match found: {partner_data.get('nickname')}! You are the initiator and will pay for messages.")
+            await context.bot.send_message(partner_id, f"✅ You've been matched with {user_data.get('nickname')}! You will earn points for messages you receive.")
+        else:
+            await query.edit_message_text("❌ No available partners found. Please try again later.")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = get_user_data(user_id)
-    
-    # Check if we're in profile setup mode
-    if context.user_data.get('setting_up_profile'):
-        step = context.user_data.get('profile_setup_step')
-        
-        if step == 'nickname':
-            nickname = update.message.text
-            update_user_data(user_id, {'nickname': nickname})
-            
-            context.user_data['profile_setup_step'] = 'age'
-            
-            keyboard = [
-                [InlineKeyboardButton(a.value, callback_data=f"age_{a.name}") for a in AgeGroup],
-                [InlineKeyboardButton("Skip for now", callback_data="age_skip")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                "Nice nickname! Now select your age group:",
-                reply_markup=reply_markup
-            )
+
+    # Handle profile setup
+    if context.user_data.get("state") == "PROFILE_NICKNAME":
+        update_user_data(user_id, {"nickname": update.message.text})
+        context.user_data["state"] = "PROFILE_AGE"
+        keyboard = [
+            [InlineKeyboardButton(a.value, callback_data=f"age_{a.name}") for a in AgeGroup],
+            [InlineKeyboardButton("Keep Current", callback_data="age_skip")]
+        ]
+        await update.message.reply_text("Nice nickname! Now select your age group:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
-    
-    # Check if user is in a conversation
-    if user_data.get('in_conversation'):
-        partner_id = user_data.get('conversation_partner')
-        if not partner_id:
-            await update.message.reply_text("Error: No conversation partner found.")
-            return
+
+    # Handle conversation messages
+    if user_data.get("in_conversation"):
+        partner_id = user_data.get("conversation_partner")
+        if not partner_id: return
+
+        is_initiator = user_data.get("is_initiator", False)
+        cost = 0
         
-        # Get role information
-        is_initiator = user_data.get('is_initiator', False)
-        partner_data = get_user_data(partner_id)
+        if update.message.text: cost = len(update.message.text)
+        elif update.message.photo: cost = 150
+        elif update.message.video: cost = 250
         
-        # Handle text messages
-        if update.message.text:
-            message_text = update.message.text
-            message_length = len(message_text)
+        if is_initiator:
+            user_points = user_data.get("points", 0)
+            if user_points < cost:
+                await update.message.reply_text(f"❌ Not enough points. Cost: {cost}, Your points: {user_points}.")
+                return
             
-            if is_initiator:
-                # Initiator pays for their messages
-                user_points = user_data.get('points', 0)
-                
-                # Check if initiator has enough points
-                if user_points < message_length:
-                    await update.message.reply_text(
-                        f"❌ Not enough points to send this message. "
-                        f"Please check your balance with /points"
-                    )
-                    return
-                
-                # Deduct points from initiator
-                update_user_data(user_id, {'points': user_points - message_length})
-                
-                # Add points to partner (who was selected from pool)
-                partner_points = partner_data.get('points', 0)
-                update_user_data(partner_id, {'points': partner_points + message_length})
-                
-                # Forward message to partner (without caption)
-                await context.bot.send_message(
-                    chat_id=partner_id,
-                    text=message_text  # Just the message text, no caption
-                )
-                
-                # No success notification for sender
-            else:
-                # Partner (selected from pool) sends messages for FREE
-                # No point deduction or earning for partner's messages
-                
-                # Forward message to initiator (without caption)
-                await context.bot.send_message(
-                    chat_id=partner_id,
-                    text=message_text  # Just the message text, no caption
-                )
+            update_user_data(user_id, {"points": user_points - cost})
+            partner_data = get_user_data(partner_id)
+            update_user_data(partner_id, {"points": partner_data.get("points", 0) + cost})
         
-        # Handle photos
-        elif update.message.photo:
-            if is_initiator:
-                # Initiator pays for photos
-                user_points = user_data.get('points', 0)
-                photo_cost = 150
-                
-                # Check if initiator has enough points
-                if user_points < photo_cost:
-                    await update.message.reply_text(
-                        f"❌ Not enough points to send this image. "
-                        f"You need {photo_cost} points but have only {user_points}."
-                    )
-                    return
-                
-                # Deduct points from initiator
-                update_user_data(user_id, {'points': user_points - photo_cost})
-                
-                # Add points to partner
-                partner_points = partner_data.get('points', 0)
-                update_user_data(partner_id, {'points': partner_points + photo_cost})
-                
-                # Forward photo to partner
-                photo_file = await update.message.photo[-1].get_file()
-                await context.bot.send_photo(
-                    chat_id=partner_id,
-                    photo=photo_file.file_id
-                )
-            else:
-                # Partner sends photos for FREE
-                photo_file = await update.message.photo[-1].get_file()
-                await context.bot.send_photo(
-                    chat_id=partner_id,
-                    photo=photo_file.file_id
-                )
-        
-        # Handle videos
-        elif update.message.video:
-            if is_initiator:
-                # Initiator pays for videos
-                user_points = user_data.get('points', 0)
-                video_cost = 250
-                
-                # Check if initiator has enough points
-                if user_points < video_cost:
-                    await update.message.reply_text(
-                        f"❌ Not enough points to send this video. "
-                        f"You need {video_cost} points but have only {user_points}."
-                    )
-                    return
-                
-                # Deduct points from initiator
-                update_user_data(user_id, {'points': user_points - video_cost})
-                
-                # Add points to partner
-                partner_points = partner_data.get('points', 0)
-                update_user_data(partner_id, {'points': partner_points + video_cost})
-                
-                # Forward video to partner
-                video_file = await update.message.video.get_file()
-                await context.bot.send_video(
-                    chat_id=partner_id,
-                    video=video_file.file_id
-                )
-            else:
-                # Partner sends videos for FREE
-                video_file = await update.message.video.get_file()
-                await context.bot.send_video(
-                    chat_id=partner_id,
-                    video=video_file.file_id
-                )
-    
+        # Using forward_message is cleaner as it handles all media types and captions
+        await update.message.forward(chat_id=partner_id)
     else:
-        await update.message.reply_text(
-            "You're not in a conversation. Use /find to find a partner to chat with."
-        )
+        await update.message.reply_text("You are not in a conversation. Use /find to start one.")
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
+    logger.error("".join(tb_list))
+
+# --- Flask Webserver and PTB Application Setup ---
+
+application = Application.builder().token(TOKEN).build()
+
+# Command handlers
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("help", help_command))
+application.add_handler(CommandHandler("profile", profile))
+application.add_handler(CommandHandler("points", points))
+application.add_handler(CommandHandler("join", join_pool))
+application.add_handler(CommandHandler("leave", leave_pool))
+application.add_handler(CommandHandler("find", find_partner_cmd))
+application.add_handler(CommandHandler("end", end_conversation))
+application.add_handler(CommandHandler("report", report_user))
+application.add_handler(CommandHandler("transact", transact))
+
+# Message and Callback handlers
+application.add_handler(CallbackQueryHandler(button_handler))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_message))
 
 # Error handler
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Exception while handling an update:", exc_info=context.error)
+application.add_error_handler(error_handler)
 
-# Main function
-def main():
-    # Create updater and dispatcher
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
-    
-    # Add handlers
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("profile", profile))
-    dp.add_handler(CommandHandler("points", points))
-    dp.add_handler(CommandHandler("join", join_pool))
-    dp.add_handler(CommandHandler("leave", leave_pool))
-    dp.add_handler(CommandHandler("find", find_partner_cmd))
-    dp.add_handler(CommandHandler("end", end_conversation))
-    dp.add_handler(CommandHandler("report", report_user))
-    dp.add_handler(CommandHandler("transact", transact))
-    
-    dp.add_handler(CallbackQueryHandler(button_handler))
-    
-    # Handle text messages
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    
-    # Handle photo messages
-    dp.add_handler(MessageHandler(Filters.photo, handle_message))
-    
-    # Handle video messages
-    dp.add_handler(MessageHandler(Filters.video, handle_message))
-    
-    # Set up webhook for Render
-    port = int(os.environ.get('PORT', 5000))
-    updater.start_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=TOKEN,
-        webhook_url=f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
-    )
-    updater.idle()
+# --- Flask Routes ---
 
-# Health check endpoint
-@app.route('/health')
+@app.route("/")
+def index():
+    return "LomiTalk Bot is running!"
+
+@app.route("/health")
 def health_check():
-    return 'OK', 200
+    return "OK", 200
 
-# Webhook handler
-@app.route(f'/{TOKEN}', methods=['POST'])
-def webhook():
-    update = Update.de_json(request.get_json(), bot)
-    dp.process_update(update)
-    return 'OK', 200
+# This is the webhook endpoint that Telegram will call
+@app.route(f"/{TOKEN}", methods=["POST"])
+async def telegram_webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    await application.process_update(update)
+    return "OK", 200
 
-# Home page
-@app.route('/')
-def home():
-    return 'LomiTalk Bot is running!'
-
-if __name__ == "__main__":
-    # Initialize bot and dispatcher
-    from telegram import Bot
-    bot = Bot(token=TOKEN)
-    dp = None
+# Call this endpoint ONCE after deploying to set the webhook
+@app.route("/set_webhook", methods=["GET"])
+async def set_webhook():
+    hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if not hostname:
+        return "RENDER_EXTERNAL_HOSTNAME environment variable not set", 500
     
-    # Start the Flask app
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    webhook_url = f"https://{hostname}/{TOKEN}"
+    await application.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
+    return f"Webhook successfully set to {webhook_url}", 200
 
+# This part is for local development and will not be used by Render's Gunicorn server
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
