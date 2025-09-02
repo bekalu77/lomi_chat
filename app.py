@@ -95,6 +95,16 @@ def setup_database():
         raise RuntimeError("Failed to set up SQLite database.") from e
 
 
+def safe_int(value):
+    """Convert to int if possible, else return None."""
+    if value is None or str(value).lower() == "none":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
 def get_user_data(user_id) -> Dict:
     conn = _connect_db()
     conn.row_factory = sqlite3.Row
@@ -104,12 +114,16 @@ def get_user_data(user_id) -> Dict:
         row = cursor.fetchone()
         if row:
             user_data = dict(row)
-            user_data['profile_complete'] = bool(user_data['profile_complete'])
-            user_data['in_pool'] = bool(user_data['in_pool'])
-            user_data['in_conversation'] = bool(user_data['in_conversation'])
-            user_data['is_initiator'] = bool(user_data['is_initiator'])
-            if user_data['conversation_partner']:
-                user_data['conversation_partner'] = safe_int(user_data.get('conversation_partner'))
+
+            # Convert boolean-like fields
+            user_data['profile_complete'] = bool(user_data.get('profile_complete'))
+            user_data['in_pool'] = bool(user_data.get('in_pool'))
+            user_data['in_conversation'] = bool(user_data.get('in_conversation'))
+            user_data['is_initiator'] = bool(user_data.get('is_initiator'))
+
+            # Always use safe conversion
+            user_data['conversation_partner'] = safe_int(user_data.get('conversation_partner'))
+
             return user_data
         return {}
     except sqlite3.Error:
@@ -117,6 +131,7 @@ def get_user_data(user_id) -> Dict:
         return {}
     finally:
         conn.close()
+
 
 
 def update_user_data(user_id, updates):
@@ -174,29 +189,29 @@ def update_user_data(user_id, updates):
         conn.close()
 
 
-def get_all_users() -> Dict[str, Dict]:
+def get_all_users() -> List[Dict]:
     conn = _connect_db()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
         cursor.execute('SELECT * FROM users')
         rows = cursor.fetchall()
-        all_users = {}
+        users = []
         for row in rows:
             user_data = dict(row)
-            user_data['profile_complete'] = bool(user_data['profile_complete'])
-            user_data['in_pool'] = bool(user_data['in_pool'])
-            user_data['in_conversation'] = bool(user_data['in_conversation'])
-            user_data['is_initiator'] = bool(user_data['is_initiator'])
-            if user_data['conversation_partner']:
-                user_data['conversation_partner'] = int(user_data['conversation_partner'])
-            all_users[str(user_data['user_id'])] = user_data
-        return all_users
+            user_data['profile_complete'] = bool(user_data.get('profile_complete'))
+            user_data['in_pool'] = bool(user_data.get('in_pool'))
+            user_data['in_conversation'] = bool(user_data.get('in_conversation'))
+            user_data['is_initiator'] = bool(user_data.get('is_initiator'))
+            user_data['conversation_partner'] = safe_int(user_data.get('conversation_partner'))
+            users.append(user_data)
+        return users
     except sqlite3.Error:
         logger.exception("Error retrieving all users")
-        return {}
+        return []
     finally:
         conn.close()
+
 
 # --------------------
 # Domain logic
@@ -650,11 +665,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("You're not in a conversation. Use /find to find a partner to chat with.")
         
-def safe_int(value):
-    if value is None or str(value).lower() == "none":
-        return None
-    return int(value)
-
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Exception while handling an update:", exc_info=context.error)
@@ -734,5 +744,6 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
 
 
