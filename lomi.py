@@ -4,18 +4,15 @@ import logging
 from typing import Dict, Optional
 from enum import Enum
 from datetime import datetime
- 
+from flask import Flask, request
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, 
-    ContextTypes, CallbackQueryHandler, filters
+    Updater, CommandHandler, MessageHandler, 
+    CallbackQueryHandler, Filters, CallbackContext
 )
 from dotenv import load_dotenv
-from flask import Flask, request
-import threading
 
-# Create a Flask app
-app = Flask(__name__)
 # Load environment variables
 load_dotenv()
 
@@ -27,7 +24,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot token from environment
-TOKEN = os.getenv('TELEGRAM_TOKEN')
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+
+# Create Flask app
+app = Flask(__name__)
 
 # User data storage (in production, use a proper database)
 USER_DATA_FILE = 'user_data.json'
@@ -713,76 +713,67 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Main function
 def main():
-    # Create application
-    application = Application.builder().token(TOKEN).build()
+    # Create updater and dispatcher
+    updater = Updater(TOKEN, use_context=True)
+    dp = updater.dispatcher
     
     # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("profile", profile))
-    application.add_handler(CommandHandler("points", points))
-    application.add_handler(CommandHandler("join", join_pool))
-    application.add_handler(CommandHandler("leave", leave_pool))
-    application.add_handler(CommandHandler("find", find_partner_cmd))
-    application.add_handler(CommandHandler("end", end_conversation))
-    application.add_handler(CommandHandler("report", report_user))
-    application.add_handler(CommandHandler("transact", transact))
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(CommandHandler("profile", profile))
+    dp.add_handler(CommandHandler("points", points))
+    dp.add_handler(CommandHandler("join", join_pool))
+    dp.add_handler(CommandHandler("leave", leave_pool))
+    dp.add_handler(CommandHandler("find", find_partner_cmd))
+    dp.add_handler(CommandHandler("end", end_conversation))
+    dp.add_handler(CommandHandler("report", report_user))
+    dp.add_handler(CommandHandler("transact", transact))
     
-    application.add_handler(CallbackQueryHandler(button_handler))
+    dp.add_handler(CallbackQueryHandler(button_handler))
     
     # Handle text messages
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     
     # Handle photo messages
-    application.add_handler(MessageHandler(filters.PHOTO, handle_message))
+    dp.add_handler(MessageHandler(Filters.photo, handle_message))
     
     # Handle video messages
-    application.add_handler(MessageHandler(filters.VIDEO, handle_message))
+    dp.add_handler(MessageHandler(Filters.video, handle_message))
     
-    application.add_error_handler(error_handler)
-    
-    # Set up webhook for Render deployment
-    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
-    application.run_webhook(
+    # Set up webhook for Render
+    port = int(os.environ.get('PORT', 5000))
+    updater.start_webhook(
         listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
+        port=port,
         url_path=TOKEN,
-        webhook_url=webhook_url
+        webhook_url=f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
     )
+    updater.idle()
 
-# Add a health check endpoint for Render
+# Health check endpoint
 @app.route('/health')
 def health_check():
     return 'OK', 200
 
-# Add a simple homepage
+# Webhook handler
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(), bot)
+    dp.process_update(update)
+    return 'OK', 200
+
+# Home page
 @app.route('/')
 def home():
     return 'LomiTalk Bot is running!'
 
-# Webhook handler for Telegram
-@app.route(f'/{TOKEN}', methods=['POST'])
-def webhook():
-    update = Update.de_json(request.get_json(), application.bot)
-    application.process_update(update)
-    return 'OK'
-
-# Start the bot when running as a script
 if __name__ == "__main__":
-    # Start the Flask app in a separate thread
-    flask_thread = threading.Thread(
-        target=lambda: app.run(
-            host='0.0.0.0',
-            port=int(os.environ.get('PORT', 5000)),
-            debug=False,
-            use_reloader=False
-        )
-    )
-    flask_thread.daemon = True
-    flask_thread.start()
+    # Initialize bot and dispatcher
+    from telegram import Bot
+    bot = Bot(token=TOKEN)
+    dp = None
     
-    # Start the bot
-    print("Bot is running...")
-    main()
-
+    # Start the Flask app
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
 
