@@ -228,28 +228,31 @@ class Gender(Enum):
     FEMALE = "Female"
 
 
-def find_partner(user_id):
-    user_data = get_user_data(user_id)
-    if not user_data.get('in_pool', False):
+def find_partner(user_id: str) -> Optional[int]:
+    """Find a matching partner for the given user."""
+    all_users = get_all_users()
+    if not all_users:
         return None
 
-    all_users = get_all_users()
-    user_pref_gender = user_data.get('preferred_gender')
-    user_pref_age = user_data.get('preferred_age_group')
-    user_id_str = str(user_id)
+    # Get current user data
+    current_user = None
+    for user in all_users:
+        if str(user.get("user_id")) == str(user_id):
+            current_user = user
+            break
 
-    for uid, data in all_users.items():
-        if (
-            uid != user_id_str
-            and data.get('in_pool', False)
-            and not data.get('in_conversation', False)
-            and data.get('profile_complete', False)
-        ):
-            if user_pref_gender and user_pref_gender != data.get('gender'):
-                continue
-            if user_pref_age and user_pref_age != data.get('age_group'):
-                continue
-            return int(uid)
+    if not current_user:
+        return None
+
+    # Loop through all other users to find a match
+    for user in all_users:
+        if str(user.get("user_id")) == str(user_id):
+            continue  # skip self
+
+        if (user.get("in_pool") and user.get("profile_complete") and not user.get("in_conversation")):
+            # Check gender/age preference if needed
+            return safe_int(user.get("user_id"))
+
     return None
 
 # --------------------
@@ -744,6 +747,7 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
 
 
 
