@@ -21,6 +21,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+import psycopg2
 
 # --------------------
 # Bootstrap & settings
@@ -57,11 +58,8 @@ DB_FILE = os.getenv("DB_FILE", "lomitalk.db")
 # --------------------
 # NOTE: Render free tier has an ephemeral filesystem. Your SQLite DB will reset on redeploys or restarts.
 # For persistence, switch to Postgres later. This code is kept as-is for minimal changes.
-
 def _connect_db():
-    # create a fresh connection per call (safe with async handlers)
-    return sqlite3.connect(DB_FILE, check_same_thread=False)
-
+    return psycopg2.connect(os.getenv("DATABASE_URL"))
 
 def setup_database():
     try:
@@ -747,6 +745,7 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
 
 
 
