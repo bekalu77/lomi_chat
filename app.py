@@ -687,7 +687,7 @@ application.add_handler(CommandHandler("find", find_partner_cmd))
 application.add_handler(CommandHandler("end", end_conversation))
 application.add_handler(CommandHandler("report", report_user))
 application.add_handler(CommandHandler("transact", transact))
-application.add_handler(CommandHandler("setbalance", setbalance))
+application.add_handler(CommandHandler("setbalance", set_balance))
 application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 application.add_handler(MessageHandler(filters.PHOTO, handle_message))
@@ -749,3 +749,4 @@ async def telegram_webhook(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
