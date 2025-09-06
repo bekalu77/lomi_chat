@@ -466,15 +466,24 @@ async def handle_find_age_callback(update: Update, context: ContextTypes.DEFAULT
 async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     user_data = await get_user_data_async(user_id)
-    if not user_data or not user_data.get('in_conversation'):
+    if not user_data or not user_data.get("in_conversation"):
         await update.message.reply_text("Not in a conversation.")
         return
-    partner_id = user_data.get('conversation_partner')
-    await update_user_data_async(user_id, {'in_conversation': False, 'conversation_partner': None, 'is_initiator': False})
+    partner_id = user_data.get("conversation_partner")
+
+    await update_user_data_async(user_id, {"in_conversation": False, "conversation_partner": None, "is_initiator": False})
     if partner_id:
-        await update_user_data_async(str(partner_id), {'in_conversation': False, 'conversation_partner': None, 'is_initiator': False})
-        await context.bot.send_message(chat_id=partner_id, text="Your partner ended the conversation.")
-    await update.message.reply_text("Conversation ended.")
+        await update_user_data_async(str(partner_id), {"in_conversation": False, "conversation_partner": None, "is_initiator": False})
+
+        # Show balances to both users
+        updated_user = await get_user_data_async(user_id)
+        updated_partner = await get_user_data_async(str(partner_id))
+
+        await context.bot.send_message(chat_id=user_id, text=f"Conversation ended.\nYour balance: {format_balance(updated_user.get('points',0))}")
+        await context.bot.send_message(chat_id=partner_id, text=f"Your partner ended the conversation.\nYour balance: {format_balance(updated_partner.get('points',0))}")
+    else:
+        await update.message.reply_text("Conversation ended.")
+
 
 async def report_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -507,25 +516,37 @@ async def transact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Admin-only: setbalance
 async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_ID:
+    ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")  # without @
+    ADMIN_ID = os.getenv("ADMIN_ID")
+
+    user_id = str(update.effective_user.id)
+    username = update.effective_user.username or ""
+
+    # Check admin
+    if str(user_id) != str(ADMIN_ID) and username.lower() != (ADMIN_USERNAME or "").lower():
         await update.message.reply_text("❌ You are not authorized to use this command.")
         return
-    
+
     if len(context.args) < 3:
-        await update.message.reply_text("Usage: /setbalance <username> <add|subtract|reset> <amount>")
+        await update.message.reply_text(
+            "Usage: /setbalance <username> <add|subtract|reset> <amount>\n"
+            "Example: /setbalance johndoe add 1000"
+        )
         return
 
-    username = context.args[0]
+    target_username = context.args[0].lstrip("@").lower()
     action = context.args[1].lower()
     amount = int(context.args[2]) if action != "reset" else 0
 
-    # Fetch user by username
-    user_data = db.get_user_by_username(username)
-    if not user_data:
-        await update.message.reply_text("❌ User not found.")
+    # Fetch all users and find by username
+    users = await get_all_users_async()
+    target_user = next((u for u in users if (u.get("username") or "").lower() == target_username), None)
+
+    if not target_user:
+        await update.message.reply_text(f"❌ User @{target_username} not found.")
         return
 
-    current_points = user_data["points"]
+    current_points = target_user.get("points", 0)
 
     if action == "add":
         new_points = current_points + amount
@@ -537,9 +558,11 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid action. Use add, subtract, or reset.")
         return
 
-    db.update_user_points(user_data["user_id"], new_points)
-    lemons = new_points / 1000
-    await update.message.reply_text(f"✅ {username}'s balance updated to {new_points} points ({lemons:.2f} 🍋 Lemons)")
+    await update_user_data_async(target_user["user_id"], {"points": new_points})
+    await update.message.reply_text(
+        f"✅ Balance updated for @{target_username}: {format_balance(new_points)}"
+    )
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -592,12 +615,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     user_data = await get_user_data_async(user_id)
 
-    if context.user_data.get('setting_up_profile'):
-        step = context.user_data.get('profile_setup_step')
-        if step == 'nickname':
+    if context.user_data.get("setting_up_profile"):
+        # Profile setup logic (unchanged)
+        step = context.user_data.get("profile_setup_step")
+        if step == "nickname":
             nickname = update.message.text.strip()[:32]
-            await update_user_data_async(user_id, {'nickname': nickname})
-            context.user_data['profile_setup_step'] = 'age'
+            await update_user_data_async(user_id, {"nickname": nickname})
+            context.user_data["profile_setup_step"] = "age"
             keyboard_rows = [
                 [InlineKeyboardButton(AgeGroup.AGE_18_25.value, callback_data="age_AGE_18_25")],
                 [InlineKeyboardButton(AgeGroup.AGE_26_35.value, callback_data="age_AGE_26_35")],
@@ -607,70 +631,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Select your age group:", reply_markup=InlineKeyboardMarkup(keyboard_rows))
         return
 
-    if user_data.get('in_conversation'):
-        partner_id = user_data.get('conversation_partner')
+    if user_data.get("in_conversation"):
+        partner_id = user_data.get("conversation_partner")
         if not partner_id:
             await update.message.reply_text("Error: partner missing.")
             return
-        is_initiator = user_data.get('is_initiator', False)
+        is_initiator = user_data.get("is_initiator", False)
         partner_data = await get_user_data_async(str(partner_id))
-        # Text message
-        if update.message.text:
-            message_text = update.message.text
-            message_length = len(message_text)
-            if is_initiator:
-                user_points = user_data.get('points', 0)
-                if user_points < message_length:
-                    await update.message.reply_text("Not enough points. Check /points.")
-                    return
-                # transfer points
-                await update_user_data_async(user_id, {'points': user_points - message_length})
-                partner_points = partner_data.get('points', 0)
-                await update_user_data_async(str(partner_id), {'points': partner_points + message_length})
 
-                # send message
-                await context.bot.send_message(chat_id=partner_id, text=message_text)
-                # brief confirmation with updated balance
-                new_user_data = await get_user_data_async(user_id)
-                await update.message.reply_text(f"Sent. New balance: {format_balance(new_user_data.get('points',0))}")
-            else:
-                # receiver simply receives message (no cost)
-                await context.bot.send_message(chat_id=partner_id, text=message_text)
-        # Photo
+        # Calculate cost based on message type
+        cost = 0
+        if update.message.text:
+            cost = len(update.message.text)
         elif update.message.photo:
-            photo_cost = 150 if is_initiator else 0
-            if is_initiator:
-                user_points = user_data.get('points', 0)
-                if user_points < photo_cost:
-                    await update.message.reply_text(f"Need {photo_cost} points to send image.")
-                    return
-                await update_user_data_async(user_id, {'points': user_points - photo_cost})
-                partner_points = partner_data.get('points', 0)
-                await update_user_data_async(str(partner_id), {'points': partner_points + photo_cost})
+            cost = 150
+        elif update.message.video:
+            cost = 250
+
+        if is_initiator and cost > 0:
+            user_points = user_data.get("points", 0)
+            if user_points < cost:
+                await update.message.reply_text(f"Not enough points. You need {cost} points.")
+                return
+            # Deduct and update partner
+            await update_user_data_async(user_id, {"points": user_points - cost})
+            await update_user_data_async(str(partner_id), {"points": partner_data.get("points", 0) + cost})
+
+        # Forward message to partner
+        if update.message.text:
+            await context.bot.send_message(chat_id=partner_id, text=update.message.text)
+        elif update.message.photo:
             photo_file = await update.message.photo[-1].get_file()
             await context.bot.send_photo(chat_id=partner_id, photo=photo_file.file_id)
-            new_user_data = await get_user_data_async(user_id)
-            await update.message.reply_text(f"Image sent. Balance: {format_balance(new_user_data.get('points',0))}")
-        # Video
         elif update.message.video:
-            video_cost = 250 if is_initiator else 0
-            if is_initiator:
-                user_points = user_data.get('points', 0)
-                if user_points < video_cost:
-                    await update.message.reply_text(f"Need {video_cost} points to send video.")
-                    return
-                await update_user_data_async(user_id, {'points': user_points - video_cost})
-                partner_points = partner_data.get('points', 0)
-                await update_user_data_async(str(partner_id), {'points': partner_points + video_cost})
             video_file = await update.message.video.get_file()
             await context.bot.send_video(chat_id=partner_id, video=video_file.file_id)
-            new_user_data = await get_user_data_async(user_id)
-            await update.message.reply_text(f"Video sent. Balance: {format_balance(new_user_data.get('points',0))}")
     else:
         await update.message.reply_text("Not in conversation. Use /find to search for matches.")
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error("Exception while handling an update:", exc_info=context.error)
 
 # --------------------
 # Build Application and FastAPI
@@ -749,4 +746,5 @@ async def telegram_webhook(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
 
