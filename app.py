@@ -1,3 +1,4 @@
+# app.py
 import os
 import logging
 from typing import Dict, List, Optional, Any
@@ -31,40 +32,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger("lomitalk")
 
-# Telegram env
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN is not set. Add it in your environment.")
 
-WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")  # optional but recommended
+WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 BASE_URL = (os.getenv("WEBHOOK_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set. Add your Neon connection string as DATABASE_URL.")
 
-# Admin username and ID from environment
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
-# DB pool: will be created at startup
 db_pool: Optional[asyncpg.pool.Pool] = None
 
 # --------------------
-# Utilities & helpers
+# Utilities
 # --------------------
-def safe_int(value: Any) -> Optional[int]:
-    """Convert to int if possible, else return None."""
-    if value is None:
-        return None
-    s = str(value).strip()
-    if s == "" or s.lower() == "none":
-        return None
-    try:
-        return int(s)
-    except (ValueError, TypeError):
-        return None
-
 def bool_from_db(val: Any) -> bool:
     if isinstance(val, bool):
         return val
@@ -77,7 +62,7 @@ def format_balance(points: int) -> str:
     return f"{points} points ({lemons:.2f} 🍋 Lemons)"
 
 # --------------------
-# DB operations (asyncpg)
+# DB operations
 # --------------------
 CREATE_USERS_SQL = """
 CREATE TABLE IF NOT EXISTS users (
@@ -99,11 +84,10 @@ CREATE TABLE IF NOT EXISTS users (
 
 async def init_db_pool():
     global db_pool
-    logger.info("Creating DB pool to %s", DATABASE_URL)
     db_pool = await asyncpg.create_pool(DATABASE_URL, max_size=10)
     async with db_pool.acquire() as conn:
         await conn.execute(CREATE_USERS_SQL)
-    logger.info("DB pool initialized and schema ensured.")
+    logger.info("DB pool initialized.")
 
 async def close_db_pool():
     global db_pool
@@ -132,7 +116,6 @@ async def get_user_data_async(user_id: str) -> Dict:
 async def update_user_data_async(user_id: str, updates: Dict) -> bool:
     if not db_pool:
         return False
-
     current = await get_user_data_async(user_id)
     merged = {**current, **updates}
     points = int(merged.get('points', 1000))
@@ -179,7 +162,7 @@ async def update_user_data_async(user_id: str, updates: Dict) -> bool:
                                joined_date, username, gender, age_group, nickname,
                                preferred_age_group)
             return True
-        except Exception as e:
+        except Exception:
             logger.exception("Failed to upsert user %s", user_id)
             return False
 
@@ -213,89 +196,169 @@ class Gender(Enum):
     MALE = "Male"
     FEMALE = "Female"
 
-# --------------------
-# Handlers
-# --------------------
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Exception while handling an update:", exc_info=context.error)
-
-# ✅ (Keep the rest of your handlers as they were — start, help, profile, points, join, leave, find, setbalance, etc.)
-# I will keep all logic same, just ensured error_handler is defined before usage.
-
-# --------------------
-# Bot Application
-# --------------------
-application = Application.builder().token(TOKEN).build()
-application.add_error_handler(error_handler)
-
-# Register commands
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("help", help_command))
-application.add_handler(CommandHandler("profile", profile))
-application.add_handler(CommandHandler("points", points))
-application.add_handler(CommandHandler("join", join_pool))
-application.add_handler(CommandHandler("leave", leave_pool))
-application.add_handler(CommandHandler("find", find_partner_cmd))
-application.add_handler(CommandHandler("end", end_conversation))
-application.add_handler(CommandHandler("report", report_user))
-application.add_handler(CommandHandler("transact", transact))
-application.add_handler(CommandHandler("setbalance", set_balance))
-application.add_handler(CallbackQueryHandler(button_handler))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-application.add_handler(MessageHandler(filters.PHOTO, handle_message))
-application.add_handler(MessageHandler(filters.VIDEO, handle_message))
+async def find_partner_async(user_id: str, target_age_group: Optional[str] = None) -> Optional[str]:
+    current_user = await get_user_data_async(user_id)
+    if not current_user or not current_user.get('in_pool'):
+        return None
+    all_users = await get_all_users_async()
+    my_gender = current_user.get('gender')
+    desired_gender = Gender.FEMALE.value if my_gender == Gender.MALE.value else Gender.MALE.value
+    for u in all_users:
+        uid = str(u.get('user_id'))
+        if uid == user_id:
+            continue
+        if not u.get('in_pool') or u.get('in_conversation') or not u.get('profile_complete'):
+            continue
+        if u.get('gender') != desired_gender:
+            continue
+        if target_age_group and u.get('age_group') != target_age_group:
+            continue
+        return uid
+    return None
 
 # --------------------
-# FastAPI Integration
+# Bot Handlers
+# --------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    user_data = await get_user_data_async(user_id)
+    if not user_data:
+        await update_user_data_async(user_id, {
+            'points': 1000,
+            'profile_complete': False,
+            'in_pool': False,
+            'in_conversation': False,
+            'conversation_partner': None,
+            'joined_date': datetime.now().isoformat(),
+            'username': update.effective_user.username
+        })
+        await update.message.reply_text("Welcome! You received 1000 points (1.00 🍋 Lemon). Use /profile to set up profile.")
+    else:
+        current_username = update.effective_user.username
+        if user_data.get('username') != current_username:
+            await update_user_data_async(user_id, {'username': current_username})
+        points = user_data.get('points', 0)
+        await update.message.reply_text(f"Welcome back.\nBalance: {format_balance(points)}\nUse /help for commands.")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "Commands:\n"
+        "/start - register\n"
+        "/profile - set/edit profile\n"
+        "/points - show balance\n"
+        "/join - join pool\n"
+        "/leave - leave pool\n"
+        "/find - find a date\n"
+        "/end - end conversation\n"
+        "/report - report partner\n"
+        "/transact - transaction info\n"
+        "/setbalance - admin only\n"
+    )
+    await update.message.reply_text(help_text)
+
+# --------------------
+# Conversation & message handling
+# --------------------
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    user_data = await get_user_data_async(user_id)
+    if not user_data or not user_data.get('in_conversation'):
+        await update.message.reply_text("You are not in a conversation. Use /find to match.")
+        return
+
+    partner_id = user_data.get('conversation_partner')
+    if not partner_id:
+        await update.message.reply_text("Error: partner not found.")
+        return
+
+    # Deduct 1 point for sender
+    new_points_sender = max(0, user_data.get('points', 0) - 1)
+    await update_user_data_async(user_id, {'points': new_points_sender})
+
+    # Add 1 point to receiver
+    partner_data = await get_user_data_async(partner_id)
+    if partner_data:
+        new_points_receiver = partner_data.get('points', 0) + 1
+        await update_user_data_async(partner_id, {'points': new_points_receiver})
+
+    # Forward message to partner
+    await context.bot.forward_message(chat_id=int(partner_id),
+                                      from_chat_id=int(user_id),
+                                      message_id=update.message.message_id)
+
+# --------------------
+# End conversation
+# --------------------
+async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    user_data = await get_user_data_async(user_id)
+    if not user_data or not user_data.get('in_conversation'):
+        await update.message.reply_text("You are not in a conversation.")
+        return
+
+    partner_id = user_data.get('conversation_partner')
+    await update_user_data_async(user_id, {
+        'in_conversation': False,
+        'conversation_partner': None,
+        'is_initiator': False
+    })
+    if partner_id:
+        await update_user_data_async(partner_id, {
+            'in_conversation': False,
+            'conversation_partner': None,
+            'is_initiator': False
+        })
+
+        # Notify both users with updated balances
+        sender_points = (await get_user_data_async(user_id)).get('points', 0)
+        receiver_points = (await get_user_data_async(partner_id)).get('points', 0)
+        await context.bot.send_message(chat_id=int(user_id),
+                                       text=f"Conversation ended.\nYour balance: {format_balance(sender_points)}")
+        await context.bot.send_message(chat_id=int(partner_id),
+                                       text=f"Conversation ended.\nYour balance: {format_balance(receiver_points)}")
+    else:
+        await update.message.reply_text("Conversation ended.")
+
+# --------------------
+# FastAPI app for webhook
 # --------------------
 app = FastAPI()
-WEBHOOK_PATH = f"/{TOKEN}"
+telegram_app: Optional[Application] = None
 
 @app.on_event("startup")
 async def on_startup():
+    global telegram_app
     await init_db_pool()
-    await application.initialize()
-    await application.start()
-    if BASE_URL:
-        webhook_url = f"{BASE_URL}{WEBHOOK_PATH}"
-        try:
-            if WEBHOOK_SECRET:
-                await application.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
-            else:
-                await application.bot.set_webhook(url=webhook_url)
-            logger.info("Webhook set to %s", webhook_url)
-        except Exception:
-            logger.exception("Failed to set webhook to %s", webhook_url)
-    else:
-        logger.warning("BASE_URL empty; webhook not set.")
+    telegram_app = Application.builder().token(TOKEN).build()
+    # Register handlers
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(CommandHandler("end", end_conversation))
+    telegram_app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, handle_message))
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling()
+    logger.info("Bot started.")
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    try:
-        await application.stop()
-        await application.shutdown()
-    finally:
-        await close_db_pool()
+    if telegram_app:
+        await telegram_app.stop()
+    await close_db_pool()
+    logger.info("App shutdown completed.")
 
-@app.get("/")
-async def home():
-    return PlainTextResponse("LomiTalk Bot is running!")
-
-@app.get("/health")
-async def health():
-    return PlainTextResponse("OK")
-
-@app.post(WEBHOOK_PATH)
+@app.post(f"/telegram/{WEBHOOK_SECRET}", response_class=PlainTextResponse)
 async def telegram_webhook(request: Request):
-    if WEBHOOK_SECRET:
-        secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-        if secret != WEBHOOK_SECRET:
-            raise HTTPException(status_code=403, detail="Invalid secret token")
+    if not telegram_app:
+        raise HTTPException(status_code=503, detail="Bot not ready")
     data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.update_queue.put(update)
-    return PlainTextResponse("OK")
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.update_queue.put(update)
+    return "OK"
 
+# --------------------
+# Run locally for debug
+# --------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), log_level="info")
